@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>J.A.R.V.I.S — Voice HUD</title>
+<style>
+  /* ------------------------------------------------------------------ *
+   * Palette: red on near-black. White is reserved for the centre label
+   * and the subtitle; green exists only as the status dot.
+   * ------------------------------------------------------------------ */
+  :root {
+    --red:      #ff1a10;
+    --red-mid:  #c2140c;
+    --red-dim:  #7a0f0f;
+    --red-deep: #350707;
+    --bg:       #050102;
+    --white:    #f6f7f8;
+    --green:    #39ff88;
+    --ui: "Segoe UI", "Trebuchet MS", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--red);
+    font-family: var(--ui);
+    display: flex;
+    flex-direction: column;
+    /* Respect notches and home indicators on phones. */
+    padding: calc(8px + env(safe-area-inset-top))
+             calc(10px + env(safe-area-inset-right))
+             calc(8px + env(safe-area-inset-bottom))
+             calc(10px + env(safe-area-inset-left));
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Thin red rules running across the very top edge. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0 0 auto 0;
+    height: 3px;
+    border-bottom: 1px solid var(--red-dim);
+    background: linear-gradient(90deg, transparent, rgba(255, 26, 16, 0.55), transparent);
+    pointer-events: none;
+  }
+
+  /* ------------------------------- top bar ------------------------- */
+  .topbar {
+    flex: 0 0 auto;
+    text-align: center;
+    padding: 6px 0 10px;
+  }
+
+  .topbar__title {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 600;
+    /* Wide tracking is what sells the "system label" read. */
+    letter-spacing: 0.5em;
+    text-indent: 0.5em; /* recentres tracking that trails after the last glyph */
+    color: var(--red);
+    text-shadow: 0 0 10px rgba(255, 26, 16, 0.55);
+  }
+
+  .topbar__rule {
+    width: min(280px, 52vw);
+    height: 1px;
+    margin: 7px auto 6px;
+    background: linear-gradient(90deg, transparent, var(--red-mid), transparent);
+  }
+
+  .topbar__sub {
+    margin: 0;
+    font-size: clamp(6.5px, 1.9vw, 8px);
+    letter-spacing: 0.2em;
+    text-indent: 0.2em;
+    color: var(--red-dim);
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  /* ------------------------------ main panel ----------------------- */
+  .stage {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    border: 1px solid var(--red-deep);
+    background:
+      radial-gradient(ellipse 70% 60% at 50% 48%, rgba(122, 15, 15, 0.20), transparent 70%),
+      var(--bg);
+    overflow: hidden;
+  }
+
+  /* Corner brackets on the frame. */
+  .stage::before,
+  .stage::after {
+    content: "";
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border: 1px solid var(--red-dim);
+    pointer-events: none;
+  }
+  .stage::before { top: 6px; left: 6px; border-right: 0; border-bottom: 0; }
+  .stage::after  { bottom: 6px; right: 6px; border-left: 0; border-top: 0; }
+
+  canvas { display: block; width: 100%; height: 100%; }
+
+  /* --------------------------- base platform ----------------------- */
+  /* A short stack of glowing rules that reads as the HUD's stand. */
+  .platform {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 7px 0 6px;
+  }
+
+  .platform i {
+    display: block;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--red);
+    box-shadow: 0 0 8px rgba(255, 26, 16, 0.85);
+  }
+  .platform i:nth-child(1) { width: 92px;  opacity: 0.95; }
+  .platform i:nth-child(2) { width: 58px;  opacity: 0.6; }
+  .platform i:nth-child(3) { width: 26px;  opacity: 0.35; }
+
+  /* --------------------------- control strip ----------------------- */
+  .controls {
+    position: relative;
+    flex: 0 0 auto;
+    display: grid;
+    /* minmax(0,1fr) lets the input shrink below its content width, which a
+       flex row still lets blow out on narrow phones. */
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 9px 14px;
+    border: 1px solid var(--red-deep);
+    background: linear-gradient(180deg, rgba(53, 7, 7, 0.35), rgba(5, 1, 2, 0.6));
+  }
+
+  /* Tiny machined details at the strip's ends. */
+  .controls::before,
+  .controls::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    width: 3px;
+    height: 14px;
+    transform: translateY(-50%);
+    background: var(--red-dim);
+  }
+  .controls::before { left: 4px; }
+  .controls::after  { right: 4px; }
+
+  .controls input {
+    width: 100%;
+    min-width: 0;
+    background: rgba(5, 1, 2, 0.9);
+    border: 1px solid var(--red-deep);
+    color: var(--white);
+    font: 400 13px/1.4 var(--ui);
+    letter-spacing: 0.05em;
+    padding: 8px 10px;
+    outline: none;
+  }
+  .controls input:focus { border-color: var(--red-mid); }
+  .controls input::placeholder { color: var(--red-dim); }
+
+  .controls button {
+    min-width: 92px;
+    background: transparent;
+    border: 1px solid var(--red-mid);
+    color: var(--red);
+    font: 600 11px/1 var(--ui);
+    letter-spacing: 0.2em;
+    text-indent: 0.2em;
+    padding: 0 12px;
+    cursor: pointer;
+    transition: background 0.15s ease, box-shadow 0.15s ease;
+  }
+  .controls button:hover,
+  .controls button:focus-visible {
+    background: rgba(255, 26, 16, 0.14);
+    box-shadow: 0 0 14px rgba(255, 26, 16, 0.35);
+    outline: none;
+  }
+  .controls button:active { background: rgba(255, 26, 16, 0.28); }
+
+  /* Green "systems nominal" dot, bottom-right of the strip. */
+  .status {
+    position: absolute;
+    right: 14px;
+    bottom: -1px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+  }
+
+  /* ------------------------------ subtitle ------------------------- */
+  .subtitle {
+    flex: 0 0 auto;
+    margin: 9px 0 2px;
+    min-height: 20px;
+    text-align: center;
+    color: var(--white);
+    font-size: 14px;
+    letter-spacing: 0.06em;
+    text-shadow: 0 0 12px rgba(255, 26, 16, 0.35);
+  }
+
+  @media (max-width: 480px) {
+    .topbar__sub { display: none; }
+    .controls { padding: 8px 10px; }
+    .controls button { padding: 0 12px; letter-spacing: 0.16em; }
+    .subtitle { font-size: 13px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .controls button { transition: none; }
+  }
+</style>
+</head>
+<body>
+  <header class="topbar">
+    <h1 class="topbar__title">J.A.R.V.I.S</h1>
+    <div class="topbar__rule"></div>
+    <p class="topbar__sub">Stark Industries · Voice Interface</p>
+  </header>
+
+  <main class="stage">
+    <canvas id="hud" aria-label="J.A.R.V.I.S voice heads-up display" role="img"></canvas>
+  </main>
+
+  <div class="platform" aria-hidden="true"><i></i><i></i><i></i></div>
+
+  <form class="controls" id="controls" autocomplete="off">
+    <input id="line" type="text" placeholder="Say something…" aria-label="Line for J.A.R.V.I.S to speak" />
+    <button id="speak" type="submit">SPEAK</button>
+    <span class="status" title="Systems nominal"></span>
+  </form>
+
+  <p class="subtitle" id="subtitle" aria-live="polite"></p>
+
+<script>
+(function () {
+  'use strict';
+
+  /* =================================================================== *
+   * 1. Scene constants
+   * =================================================================== */
+
+  var TAU = Math.PI * 2;
+
+  // Radii are expressed as fractions of the usable half-size, so the whole
+  // HUD scales with the viewport without re-layout.
+  var R = {
+    outer:   0.98, // thin gapped ring
+    second:  0.86, // brighter arc, top-left to left
+    spikeIn: 0.60, // spikes grow outward from here
+    spikeLen:0.20, // maximum spike travel
+    disc:    0.58  // glowing disc sits just inside the spikes
+  };
+
+  var SPIKES = 150;          // dense enough to read as a waveform
+  var RED = [255, 26, 16];
+  var RED_DIM = [122, 15, 15];
+
+  /* =================================================================== *
+   * 2. Runtime state — everything animated is derived from these
+   * =================================================================== */
+
+  var state = {
+    speaking: false,
+    energy: 0.24,   // eased loudness: 0.24 idle ripple -> 1 while talking
+    pulse: 0,       // word-boundary kick, decays quickly
+    swirl: 0,       // spiral phase travelling around the ring
+    spin: 0,        // slow rotation of the outer ring
+    blink: 0,       // curvy brightness swell on the disc
+    lastBoundary: 0 // used to detect a browser that never fires onboundary
+  };
+
+  var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var canvas = document.getElementById('hud');
+  var ctx = canvas.getContext('2d');
+  var subtitleEl = document.getElementById('subtitle');
+  var inputEl = document.getElementById('line');
+
+  var W = 0, H = 0, CX = 0, CY = 0, S = 0; // S = scale (half the smaller side)
+
+  function resize() {
+    var rect = canvas.getBoundingClientRect();
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.max(1, Math.round(rect.width));
+    H = Math.max(1, Math.round(rect.height));
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    CX = W / 2;
+    CY = H / 2;
+    S = Math.min(W, H) / 2 * 0.86;
+    draw();
+  }
+
+  /* =================================================================== *
+   * 3. Drawing helpers
+   * =================================================================== */
+
+  function rgba(base, alpha) {
+    return 'rgba(' + base[0] + ',' + base[1] + ',' + base[2] + ',' + alpha + ')';
+  }
+
+  function mix(a, b, t) {
+    return [
+      Math.round(a[0] + (b[0] - a[0]) * t),
+      Math.round(a[1] + (b[1] - a[1]) * t),
+      Math.round(a[2] + (b[2] - a[2]) * t)
+    ];
+  }
+
+  /** Stroke an arc of `radius` between two angles. */
+  function arc(radius, from, to, width, color) {
+    ctx.beginPath();
+    ctx.arc(CX, CY, radius, from, to);
+    ctx.lineWidth = width;
+    ctx.strokeStyle = color;
+    ctx.stroke();
+  }
+
+  /** Radial tick from `r0` outward by `len` at `angle`. */
+  function tick(angle, r0, len, width, color) {
+    var ca = Math.cos(angle), sa = Math.sin(angle);
+    ctx.beginPath();
+    ctx.moveTo(CX + ca * r0, CY + sa * r0);
+    ctx.lineTo(CX + ca * (r0 + len), CY + sa * (r0 + len));
+    ctx.lineWidth = width;
+    ctx.strokeStyle = color;
+    ctx.stroke();
+  }
+
+  /**
+   * Letter-spaced text. ctx.letterSpacing is not everywhere yet, so the
+   * tracking is done glyph by glyph to stay portable.
+   */
+  function tracked(text, size, spacing, color, glow) {
+    ctx.font = '600 ' + size + 'px ' + '"Segoe UI", "Trebuchet MS", sans-serif';
+    ctx.textBaseline = 'middle';
+    var total = 0, i;
+    for (i = 0; i < text.length; i += 1) total += ctx.measureText(text[i]).width + spacing;
+    total -= spacing;
+    ctx.shadowColor = glow;
+    ctx.shadowBlur = size * 1.6;
+    ctx.fillStyle = color;
+    var x = CX - total / 2;
+    for (i = 0; i < text.length; i += 1) {
+      ctx.fillText(text[i], x, CY);
+      x += ctx.measureText(text[i]).width + spacing;
+    }
+    ctx.shadowBlur = 0;
+  }
+
+  /* =================================================================== *
+   * 4. The HUD, outside -> inside
+   * =================================================================== */
+
+  /** (a) Four separated arc segments with a band of ticks on part of it. */
+  function drawOuterRing() {
+    var radius = S * R.outer;
+    var gap = 0.30;          // radians of open space between segments
+    var span = TAU / 4 - gap;
+    ctx.save();
+    ctx.translate(CX, CY);
+    ctx.rotate(state.spin);
+    ctx.translate(-CX, -CY);
+    for (var i = 0; i < 4; i += 1) {
+      arc(radius, i * TAU / 4, i * TAU / 4 + span, 1, rgba(RED_DIM, 0.9));
+    }
+    // Ticks only cover roughly a third of the ring, like a partial gauge.
+    for (var a = 0; a < 2.1; a += TAU / 60) {
+      var major = a % (TAU / 12) < 0.01;
+      tick(a, radius + 3, major ? 8 : 4, 1, rgba(RED, major ? 0.75 : 0.35));
+    }
+    ctx.restore();
+  }
+
+  /** (b) A shorter, brighter arc across the top-left, with long ticks. */
+  function drawSecondRing() {
+    var radius = S * R.second;
+    ctx.save();
+    ctx.translate(CX, CY);
+    ctx.rotate(-state.spin * 1.6);
+    ctx.translate(-CX, -CY);
+    ctx.shadowColor = rgba(RED, 0.8);
+    ctx.shadowBlur = 10;
+    arc(radius, Math.PI * 1.02, Math.PI * 1.52, 2, rgba(RED, 0.95));
+    ctx.shadowBlur = 0;
+    for (var a = Math.PI * 1.05; a < Math.PI * 1.5; a += TAU / 18) {
+      tick(a, radius - 11, 11, 1.4, rgba(RED, 0.6));
+    }
+    ctx.restore();
+  }
+
+  /**
+   * (c) The animated layer: one thin bar per spoke, pointing outward.
+   * Length = a spiral sine travelling around the ring + a word-boundary kick.
+   */
+  function drawSpikes() {
+    var r0 = S * R.spikeIn;
+    var travel = S * R.spikeLen;
+    var e = state.energy;
+
+    for (var i = 0; i < SPIKES; i += 1) {
+      var a = (i / SPIKES) * TAU;
+
+      // Two overlapping sines at different angular frequencies produce the
+      // swirl rather than a plain "breathing" circle.
+      var spiral = Math.sin(a * 3 + state.swirl * 2.1 + Math.sin(a * 2 - state.swirl) * 0.9);
+      var ripple = Math.sin(a * 8 - state.swirl * 1.4);
+      var wave = 0.62 * spiral + 0.38 * ripple;
+
+      var len = travel * (0.16 + 0.84 * e) * (0.35 + 0.65 * (wave * 0.5 + 0.5));
+      len += travel * 0.55 * state.pulse * e;
+      len = Math.max(3, len);
+
+      // Longer bars read brighter, which is what makes it look like a meter.
+      var t = Math.min(1, len / (travel * 1.1));
+      tick(a, r0, len, 1.2, rgba(mix(RED_DIM, RED, t), 0.45 + 0.55 * t));
+    }
+  }
+
+  /** (d) Soft red disc with its faint inner outlines. */
+  function drawDisc() {
+    var radius = S * R.disc;
+    var lift = 0.55 + 0.45 * state.blink;
+
+    var g = ctx.createRadialGradient(CX, CY, 0, CX, CY, radius);
+    g.addColorStop(0, rgba(RED, 0.80 * lift));
+    g.addColorStop(0.42, rgba(RED_DIM, 0.52 * lift));
+    g.addColorStop(1, 'rgba(53,7,7,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(CX, CY, radius, 0, TAU);
+    ctx.fill();
+
+    // Faint inner outlines keep the disc from reading as a plain blob.
+    arc(radius * 0.82, 0, TAU, 1, rgba(RED, 0.22 * lift));
+    arc(radius * 0.52, 0, TAU, 1, rgba(RED, 0.14 * lift));
+  }
+
+  /** (e) White centre label, always the last thing painted. */
+  function drawLabel() {
+    var size = Math.max(9, S * 0.075);
+    var lift = 0.55 + 0.45 * state.blink;
+    var radius = S * R.disc;
+
+    // A dark scrim under the glyphs so they stay legible at any energy.
+    var g = ctx.createRadialGradient(CX, CY, 0, CX, CY, radius * 0.6);
+    g.addColorStop(0, 'rgba(5,1,2,0.6)');
+    g.addColorStop(1, 'rgba(5,1,2,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(CX, CY, radius * 0.6, 0, TAU);
+    ctx.fill();
+
+    tracked('J.A.R.V.I.S', size, size * 0.42, '#f6f7f8', rgba(RED, 0.9 * lift));
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    drawDisc();      // inside first, so the bars overlap its edge
+    drawSpikes();
+    drawSecondRing();
+    drawOuterRing();
+    drawLabel();
+  }
+
+  /* =================================================================== *
+   * 5. Animation loop
+   * =================================================================== */
+
+  var prev = performance.now();
+
+  function frame(now) {
+    var dt = Math.min(0.05, (now - prev) / 1000);
+    prev = now;
+
+    // Critically-damped style easing so level changes never snap.
+    var target = state.speaking ? 1 : 0.14;
+    state.energy += (target - state.energy) * (1 - Math.exp(-dt * 6));
+    state.pulse *= Math.exp(-dt * 7);
+
+    // A slow, curvy swell on the disc while talking; flat when idle.
+    state.blink = state.speaking
+      ? Math.pow(Math.sin(now / 1000 * 1.9) * 0.5 + 0.5, 1.7)
+      : state.blink * Math.exp(-dt * 2);
+
+    state.swirl += dt * (state.speaking ? 2.3 : 0.55);
+    state.spin += dt * 0.13;
+
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  if (reduced) {
+    // No motion: render one representative frame per state change instead.
+    state.energy = 0.14;
+    draw();
+  } else {
+    requestAnimationFrame(frame);
+  }
+
+  /* =================================================================== *
+   * 6. Speech
+   * =================================================================== */
+
+  var synth = window.speechSynthesis || null;
+  var chosenVoice = null;
+
+  function pickVoice() {
+    if (!synth) return;
+    var voices = synth.getVoices() || [];
+    var gb = voices.filter(function (v) { return /^en-GB/i.test(v.lang); });
+    // Prefer an explicitly male British voice, then any British one, then any English.
+    chosenVoice =
+      gb.filter(function (v) { return /male|daniel|arthur|george|oliver|fred/i.test(v.name); })[0] ||
+      gb[0] ||
+      voices.filter(function (v) { return /^en/i.test(v.lang); })[0] ||
+      voices[0] || null;
+  }
+
+  if (synth) {
+    pickVoice();
+    synth.onvoiceschanged = pickVoice;
+  }
+
+  var finishTimer = 0;
+  var cadence = 0;
+
+  function stopSpeaking() {
+    state.speaking = false;
+    subtitleEl.textContent = '';
+    clearInterval(cadence);
+    clearTimeout(finishTimer);
+    if (reduced) draw();
+  }
+
+  /** Kick the word-boundary pulse; real events and the fallback both use it. */
+  function beat() {
+    state.pulse = 1;
+  }
+
+  function speak(text) {
+    subtitleEl.textContent = text;
+    state.speaking = true;
+    state.energy = 0.5;
+
+    // Rough "how long would this take" estimate, used as a safety net so the
+    // HUD can never get stuck in the speaking state.
+    var words = Math.max(1, text.trim().split(/\s+/).length);
+    var estimate = 900 + (words / 2.7) * 1000 / 0.92;
+
+    if (!synth) {
+      finishTimer = setTimeout(stopSpeaking, estimate);
+      return;
+    }
+
+    synth.cancel();
+
+    var utter = new SpeechSynthesisUtterance(text);
+    utter.voice = chosenVoice;
+    utter.pitch = 0.55;
+    utter.rate = 0.92;
+    utter.lang = (chosenVoice && chosenVoice.lang) || 'en-GB';
+    utter.onend = stopSpeaking;
+    utter.onerror = stopSpeaking;
+
+    // Chrome fires this per word; Safari and some Android builds never do, so
+    // `cadence` below supplies a pulse when nothing has arrived for a while.
+    utter.onboundary = function (event) {
+      if (event.name && event.name !== 'word') return;
+      state.lastBoundary = performance.now();
+      beat();
+    };
+
+    finishTimer = setTimeout(function () {
+      if (state.speaking) stopSpeaking();
+    }, estimate + 2500);
+
+    cadence = setInterval(function () {
+      if (!state.speaking) return;
+      if (performance.now() - state.lastBoundary > 600) beat();
+      if (reduced) draw();
+    }, 260);
+
+    synth.speak(utter);
+  }
+
+  document.getElementById('controls').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var text = inputEl.value.trim() || 'Understood sir.';
+    inputEl.value = '';
+    speak(text);
+  });
+
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', resize);
+
+  resize();
+})();
+</script>
+</body>
+</html>

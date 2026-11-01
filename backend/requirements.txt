@@ -1,0 +1,10 @@
+fastapi>=0.118,<1.0
+uvicorn[standard]>=0.35,<1.0
+pydantic>=2.11,<3.0
+psutil>=7.0,<8.0
+httpx>=0.28,<1.0
+python-pptx>=1.0,<2.0
+python-dotenv>=1.1,<2.0
+pytest>=8.4,<10.0
+pycaw>=20240210
+comtypes>=1.4,<2.0

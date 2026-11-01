@@ -1,0 +1,232 @@
+/* ==========================================================================
+   Design tokens.
+   Colour is theme-driven: App.tsx writes the active --accent on the .app
+   element, so every derived tone below is expressed with color-mix() against
+   it. That keeps the electric-blue default and the amber alternative working
+   from one set of rules — nothing here may hard-code a hue.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+  --bg: #04060d;
+  --bg-raise: #090d17;
+  --panel: #0b101c;
+  --panel-2: #101a2c;
+  --line: #1b2438;
+  --line-soft: #141c2e;
+  --text: #e8edf7;
+  --text-dim: #9dabcf;
+  --text-faint: #66738c;
+  --accent: #35c8ff;
+  --good: #69f0a0;
+  --bad: #ff5c5c;
+  --warn: #ffd166;
+  --info: #5fd4ff;
+  --radius-sm: 9px;
+  --font:
+    'Segoe UI', 'Inter', 'Helvetica Neue', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+}
+
+/* HUD chrome tokens.
+   Declared on .app rather than :root on purpose: a custom property is
+   substituted where it is *declared*, and --accent only becomes the live theme
+   colour on the .app element. Declaring the derived tokens here is what lets
+   the chamfer rims, glows and hairlines follow the theme switch. */
+.app {
+  --chamfer: 12px;
+  --chamfer-sm: 8px;
+  --edge: color-mix(in srgb, var(--accent) 26%, var(--line));
+  --edge-bright: color-mix(in srgb, var(--accent) 62%, transparent);
+  --edge-dim: color-mix(in srgb, var(--accent) 13%, var(--line-soft));
+  --glow: color-mix(in srgb, var(--accent) 34%, transparent);
+  --glow-soft: color-mix(in srgb, var(--accent) 11%, transparent);
+  /* Gradient hairline separator: paints a lit edge that fades out instead of a
+     flat 1px border. Use with background-size: 100% 1px / 1px 100%. */
+  --hairline: linear-gradient(
+    90deg,
+    var(--edge-bright),
+    color-mix(in srgb, var(--accent) 16%, transparent) 42%,
+    transparent 88%
+  );
+  --hairline-rev: linear-gradient(
+    90deg,
+    transparent 12%,
+    color-mix(in srgb, var(--accent) 16%, transparent) 58%,
+    var(--edge-bright)
+  );
+  /* 1px luminous stroke laid along a clip-path chamfer. The gradient axis is
+     the corner square's diagonal, so the 50% stop line sits exactly on the cut. */
+  --cut-tl: linear-gradient(
+    to bottom right,
+    transparent calc(50% - 1px),
+    var(--edge-bright) calc(50% - 1px) calc(50% + 1.5px),
+    transparent calc(50% + 1.5px)
+  );
+  --cut-br: linear-gradient(
+    to top left,
+    transparent calc(50% - 1px),
+    var(--edge-bright) calc(50% - 1px) calc(50% + 1.5px),
+    transparent calc(50% + 1.5px)
+  );
+}
+
+.app[data-theme='blue'] {
+  --bg: #030812;
+  --bg-raise: #071022;
+  --panel: #060d1c;
+  --panel-2: #0b1728;
+  --line: #173355;
+  --line-soft: #0f2036;
+  --text-faint: #64779a;
+  background:
+    radial-gradient(1100px 640px at 78% -12%, var(--glow-soft), transparent 62%),
+    radial-gradient(900px 600px at -8% 112%, color-mix(in srgb, var(--info) 8%, transparent), transparent 58%),
+    linear-gradient(180deg, var(--bg-raise), var(--bg) 55%);
+}
+
+.app[data-theme='amber'] {
+  --bg: #05060b;
+  --bg-raise: #0a0e18;
+  --panel: #0b101c;
+  --panel-2: #131c30;
+  --line: #26304a;
+  --line-soft: #182034;
+  --text-faint: #6b7587;
+  background:
+    radial-gradient(1100px 640px at 78% -12%, var(--glow-soft), transparent 62%),
+    radial-gradient(900px 600px at -8% 112%, color-mix(in srgb, var(--info) 5%, transparent), transparent 58%),
+    linear-gradient(180deg, var(--bg-raise), var(--bg) 55%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 38%, transparent);
+  color: var(--text);
+}
+
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-radius: 0;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--accent) 48%, var(--line));
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+}
+
+button {
+  font-family: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+  color: var(--text);
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 13px;
+  outline: none;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
+  box-shadow:
+    inset 0 0 0 1px var(--glow-soft),
+    0 0 12px var(--glow-soft);
+}
+
+input::placeholder {
+  color: var(--text-faint);
+}
+
+input[type='range'] {
+  accent-color: var(--accent);
+}
+
+code,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--bg-raise) 80%, transparent);
+  border: 1px solid var(--edge-dim);
+  border-radius: 6px;
+  padding: 1px 6px;
+  overflow-wrap: anywhere;
+}
+
+h1,
+h2,
+h3,
+p,
+dl,
+dd,
+dt,
+ul {
+  margin: 0;
+  padding: 0;
+}
+
+/* Chamfered controls clip the default focus outline, so the ring is drawn
+   inside the box instead. Text inputs keep the border + glow treatment above. */
+.app :is(button, select, summary, a, [role='tab'], [role='switch'], input[type='checkbox'], input[type='radio'], input[type='color'], input[type='file']):focus-visible {
+  outline: 2px solid var(--edge-bright);
+  outline-offset: -2px;
+}
+
+[data-motion='reduced'] *,
+[data-motion='reduced'] *::before,
+[data-motion='reduced'] *::after {
+  animation-duration: 0.01s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01s !important;
+}
