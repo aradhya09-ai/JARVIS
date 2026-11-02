@@ -103,7 +103,7 @@ export function useBackend() {
             setTasks((current) => upsertTask(current, task));
             setPending({
               task_id: task.id,
-              token: String(task.confirmation_token ?? ''),
+              token: String(payload.token ?? ''),
               summary: String(payload.summary ?? ''),
               risk: (task.risk ?? 'moderate') as Confirmation['risk'],
               task,

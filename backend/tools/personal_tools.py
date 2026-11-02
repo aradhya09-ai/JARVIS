@@ -22,8 +22,12 @@ class ReminderSetArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str = Field(min_length=1, max_length=300)
     due_at: str = Field(default="", max_length=40,
-                        description="ISO date-time, local. Empty when minutes is given.")
+                        description="ISO date-time, local. Empty when a relative offset is given.")
     minutes: int | None = Field(default=None, ge=1, le=60 * 24 * 365)
+    seconds: int | None = Field(
+        default=None, ge=1, le=60 * 60 * 24 * 30,
+        description="Offset in seconds, for a sub-minute alarm like 'ring in 10 seconds'.",
+    )
     speak: bool = True
 
 
@@ -63,12 +67,18 @@ def _parse(raw: str) -> datetime | None:
 
 
 def _when(moment: datetime) -> str:
+    # "%H:%M on Tuesday" is the wrong label for something due before the minute
+    # it names, so a near-term alarm is read out to the second.
+    if (moment - _local_now()).total_seconds() < 120:
+        return moment.strftime("%H:%M:%S")
     return moment.strftime("%H:%M on %A %d %B")
 
 
 # ------------------------------------------------------------------ reminders
 async def reminder_set_handler(args: ReminderSetArgs, ctx: ToolContext) -> ToolResult:
-    if args.minutes is not None:
+    if args.seconds is not None:
+        moment = _local_now() + timedelta(seconds=args.seconds)
+    elif args.minutes is not None:
         moment = _local_now() + timedelta(minutes=args.minutes)
     elif args.due_at.strip():
         moment = _parse(args.due_at)
@@ -80,7 +90,7 @@ async def reminder_set_handler(args: ReminderSetArgs, ctx: ToolContext) -> ToolR
     else:
         return ToolResult.failure(
             "A reminder needs a time. For example: 'remind me to revise normalization "
-            "at 9 pm' or 'in 20 minutes'."
+            "at 9 pm', 'in 20 minutes' or 'in 30 seconds'."
         )
     if moment <= _local_now():
         return ToolResult.failure("That time is already past, so I did not create the reminder.")
@@ -88,10 +98,19 @@ async def reminder_set_handler(args: ReminderSetArgs, ctx: ToolContext) -> ToolR
         return ToolResult.failure(
             "Reminders are switched off in Settings, so I did not queue that."
         )
+    due_in = (moment - _local_now()).total_seconds()
     reminder = ctx.repo.add_reminder(
         args.text, moment.isoformat(timespec="seconds"), speak=args.speak, source=ctx.actor
     )
     ctx.audit.record(ctx.actor, "reminder.set", Risk.LOW.value, {"id": reminder["id"]}, "ok")
+    # The scheduler is asleep until the reminder it knew about; this wakes it so a
+    # 4-second alarm rings in 4 seconds rather than at the end of the current sleep.
+    ctx.bus.publish("reminder.created", {"id": reminder["id"], "due_at": reminder["due_at"]})
+    if due_in < 120:
+        # A timer he is about to hear ring does not need the caveats repeating.
+        return ToolResult.success(
+            f"Alarm set: {args.text} at {_when(moment)}.", reminder=reminder
+        )
     return ToolResult.success(
         f"Reminder set: {args.text} at {_when(moment)}. It rings only while JARVIS is running; "
         "if it falls due while the app is closed you will get it as 'late' on the next start.",
@@ -174,7 +193,7 @@ def build() -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="reminders.set",
-            description="Create a reminder for a time or in N minutes.",
+            description="Create a reminder or alarm for a clock time, in N minutes, or in N seconds.",
             args_model=ReminderSetArgs, risk=Risk.LOW,
             handler=reminder_set_handler, category="personal",
         ),

@@ -14,10 +14,13 @@ const EMPTY = { text: '', inMinutes: '', at: '', speak: false };
 function when(reminder: ReminderRecord, now: number): string {
   const target = new Date(reminder.due_at).getTime();
   if (Number.isNaN(target)) return reminder.due_at;
-  const delta = Math.round((target - now) / 60000);
   if (reminder.fired) return 'delivered';
   if (reminder.cancelled) return 'cancelled';
-  if (delta <= 0) return 'overdue';
+  const seconds = Math.round((target - now) / 1000);
+  if (seconds <= 0) return 'overdue';
+  // A spoken "alarm in 4 seconds" would round to zero minutes and read as overdue.
+  if (seconds < 120) return `in ${seconds} s`;
+  const delta = Math.round(seconds / 60);
   if (delta < 60) return `in ${delta} min`;
   if (delta < 60 * 24) return `in ${Math.round(delta / 60)} h`;
   return new Date(reminder.due_at).toLocaleString();
@@ -48,7 +51,9 @@ export function RemindersPanel({ online, reloadToken = 0 }: RemindersPanelProps)
   }, [online, load, reloadToken]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 30000);
+    // Second resolution, so a spoken sub-minute alarm counts down rather than
+    // sitting on a stale "in 1 min".
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
 

@@ -1296,6 +1296,46 @@
   inset: 0;
 }
 
+/* ---- Spoken subtitle, just under the reactor ---- */
+.home-subtitle {
+  position: absolute;
+  left: 50%;
+  bottom: 11%;
+  transform: translateX(-50%);
+  z-index: 6;
+  max-width: min(760px, 82vw);
+  margin: 0;
+  padding: 10px 20px;
+  text-align: center;
+  font-size: 1.05rem;
+  line-height: 1.4;
+  letter-spacing: 0.2px;
+  color: #d6f2ff;
+  background: rgba(4, 20, 34, 0.55);
+  border: 1px solid color-mix(in srgb, var(--accent, #35c8ff) 45%, transparent);
+  border-radius: 10px;
+  box-shadow: 0 0 22px color-mix(in srgb, var(--accent, #35c8ff) 30%, transparent);
+  backdrop-filter: blur(6px);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent, #35c8ff) 55%, transparent);
+  animation: subtitle-in 0.22s ease-out;
+  pointer-events: none;
+}
+
+@keyframes subtitle-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+[data-motion='reduced'] .home-subtitle {
+  animation: none;
+}
+
 /* ---- Home section menu (overlays the HUD without covering it) ---- */
 .home-menu {
   position: absolute;

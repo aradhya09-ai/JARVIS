@@ -97,6 +97,7 @@ class ReminderWrite(BaseModel):
     text: str = Field(min_length=1, max_length=300)
     due_at: str = Field(default="", max_length=40)
     minutes: int | None = Field(default=None, ge=1, le=60 * 24 * 365)
+    seconds: int | None = Field(default=None, ge=1, le=60 * 60 * 24 * 30)
     speak: bool = True
     source: str = Field(default="manual", max_length=40)
 

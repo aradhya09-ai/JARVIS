@@ -9,6 +9,7 @@ import socket
 import subprocess
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 import psutil
@@ -248,7 +249,6 @@ async def _screenshot_handler(args: ScreenshotArgs, ctx: ToolContext) -> ToolRes
 
     def capture() -> dict:
         from datetime import datetime
-        from pathlib import Path
 
         configured = str(ctx.repo.get_setting("paths.screenshots", "") or "").strip()
         target_dir = (Path(os.path.expandvars(configured)).expanduser() if configured
@@ -269,11 +269,14 @@ async def _screenshot_handler(args: ScreenshotArgs, ctx: ToolContext) -> ToolRes
     if not saved.exists():
         return ToolResult.failure("The capture reported success but no file was written.")
     ctx.repo.add_artifact("screenshot", str(saved), saved.name, ctx.task_id)
-    # Only the friendly location is spoken; the absolute path stays in the data
-    # so the UI can offer "show in folder" without reading a path aloud.
+    # Opening is deliberately limited to the file this tool just wrote: os.startfile
+    # runs an executable it is handed, so a path from a model or a webpage must never
+    # reach it. Nothing is said about where the file lives — the viewer is the reply.
+    opened, _ = await asyncio.to_thread(paths.open_path, saved)
     return ToolResult.success(
-        f"Screenshot saved to {paths.friendly_target(saved)}.",
+        "Executed." if opened else "Captured, but the viewer did not open.",
         location=paths.friendly_target(saved),
+        opened=opened,
         **info,
     )
 

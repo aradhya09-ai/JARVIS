@@ -96,7 +96,6 @@ export function HomeMenu({
               <span className="home-menu__icon">{section.icon}</span>
               <span className="home-menu__text">
                 <strong>{section.label}</strong>
-                <small>{section.hint}</small>
               </span>
             </button>
           ))}
@@ -118,7 +117,7 @@ export function HomeMenu({
             </span>
             <span className="home-menu__text">
               <strong>Remember this</strong>
-              <small>Type a detail or attach a text file — kept for life</small>
+              <small>Keep a detail for good</small>
             </span>
           </button>
 

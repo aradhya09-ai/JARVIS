@@ -61,8 +61,11 @@ const TAB_TITLES: Record<TabId, string> = {
   settings: 'Configuration',
 };
 
-// Everything except Home, offered from the Home screen's section menu.
-const HOME_SECTIONS: HomeSection[] = TABS.filter((item) => item.id !== 'dashboard');
+// The Home menu is a shortcut to what he actually reaches for while standing at the
+// reactor. Computer duplicates the telemetry the reactor already shows and Phone has
+// no paired device, so neither belongs here — both stay on the top rail.
+const HOME_SECTIONS: HomeSection[] = TABS.filter((item) =>
+  ['command', 'chat', 'automation', 'memory', 'settings'].includes(item.id));
 
 function Clock() {
   const [now, setNow] = useState(() => new Date());

@@ -37,9 +37,10 @@ from services import Services
 router = APIRouter(prefix="/api", tags=["personal"])
 
 REMINDER_NOTE = (
-    "JARVIS checks reminders every 15 seconds while the backend is running. There is "
-    "no Windows background task, so a reminder due with the app closed is delivered at "
-    "the next start and marked 'late' instead of pretending it fired on time."
+    "JARVIS wakes for each reminder at its exact due time while the backend is running, "
+    "with a 15-second sweep as the safety net. There is no Windows background task, so a "
+    "reminder due with the app closed is delivered at the next start and marked 'late' "
+    "instead of pretending it fired on time."
 )
 
 
@@ -235,11 +236,15 @@ async def list_reminders(include_finished: bool = False,
 @router.post("/reminders")
 async def add_reminder(payload: ReminderWrite,
                        services: Services = Depends(get_services)) -> dict:
-    if payload.minutes is None and not payload.due_at.strip():
+    if payload.minutes is None and payload.seconds is None and not payload.due_at.strip():
         raise HTTPException(status_code=400,
-                            detail="A reminder needs a time or a number of minutes.")
-    moment = (_now() + timedelta(minutes=max(1, payload.minutes))
-              if payload.minutes is not None else _parse_iso(payload.due_at))
+                            detail="A reminder needs a time, minutes or seconds.")
+    if payload.seconds is not None:
+        moment = _now() + timedelta(seconds=payload.seconds)
+    elif payload.minutes is not None:
+        moment = _now() + timedelta(minutes=max(1, payload.minutes))
+    else:
+        moment = _parse_iso(payload.due_at)
     if moment <= _now():
         raise HTTPException(
             status_code=400,
@@ -249,6 +254,8 @@ async def add_reminder(payload: ReminderWrite,
         payload.text, moment.isoformat(timespec="seconds"),
         speak=payload.speak, source=payload.source,
     )
+    services.bus.publish("reminder.created", {"id": reminder["id"],
+                                              "due_at": reminder["due_at"]})
     services.audit.record("user", "reminder.add", "low", {"id": reminder["id"]}, "ok")
     return {"reminder": reminder, "note": REMINDER_NOTE}
 

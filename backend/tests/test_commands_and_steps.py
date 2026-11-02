@@ -89,6 +89,53 @@ def test_plain_open_stays_a_single_action(planner):
     assert plan.steps == []
 
 
+@pytest.mark.parametrize("text,tools", [
+    ("open Chrome, set volume to 40 percent and take a screenshot",
+     ["app.open", "system.volume", "system.screenshot"]),
+    ("mute the sound and take a screenshot", ["system.volume", "system.screenshot"]),
+    ("set volume to 40 percent then open Notepad", ["system.volume", "app.open"]),
+    ("turn up the brightness and open VS Code and take a screenshot",
+     ["system.brightness", "app.open", "system.screenshot"]),
+    ("open chrome and close spotify", ["app.open", "app.close"]),
+])
+def test_every_clause_of_a_compound_command_is_planned(planner, text, tools):
+    """The old behaviour: the first rule matched, the rest was dropped in silence."""
+    plan = asyncio.run(planner.plan(text))
+    assert [step["tool"] for step in plan.sequence()] == tools
+    assert plan.intent == "compound"
+
+
+@pytest.mark.parametrize("text", [
+    "open Chrome and search for Python recursion",
+    "search YouTube for recursion and sorting tutorials",
+])
+def test_a_phrase_one_rule_already_fuses_is_not_split(planner, text):
+    """Splitting these would launch the browser twice for one request."""
+    plan = asyncio.run(planner.plan(text))
+    assert plan.tool == "browser.search"
+    assert plan.steps == []
+
+
+@pytest.mark.parametrize("text,tools", [
+    ("take a screenshot and open it", ["system.screenshot", "files.open_recent"]),
+    ("create a folder called Xentrai in Documents and open it",
+     ["files.create_folder", "files.open_folder"]),
+])
+def test_a_follow_up_that_only_says_it_keeps_the_chained_rule(planner, text, tools):
+    plan = asyncio.run(planner.plan(text))
+    assert [step["tool"] for step in plan.sequence()] == tools
+
+
+@pytest.mark.parametrize("text", [
+    "what is the time and date",
+    "open VS Code",
+    "organize Downloads",
+])
+def test_a_clause_that_is_not_an_action_never_forces_a_split(planner, text):
+    plan = asyncio.run(planner.plan(text))
+    assert plan.intent != "compound"
+
+
 class StubArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     label: str = ""
@@ -223,6 +270,16 @@ def test_single_step_task_result_is_unchanged(executor_env):
     assert reply == "First step done (solo)"
 
 
+def test_multi_step_reply_is_only_the_step_reports(executor_env):
+    """Spoken, "all 2 steps done" after two reports is words over words."""
+    executor, repo, calls = executor_env
+    plan = executor_plan("probe.ok", "one", [("probe.ok", "two")])
+    out, task = asyncio.run(run_task(executor, repo, plan, "two steps"))
+    assert task["status"] == "completed"
+    reply = [m["content"] for m in repo.list_messages() if m["task_id"] == task["id"]][-1]
+    assert reply == "First step done (one). First step done (two)."
+
+
 def executor_plan(tool, args, steps=None):
     from ai.planner import Plan
     return Plan(kind="tool", tool=tool, args={"label": args},
@@ -235,9 +292,9 @@ def executor_plan(tool, args, steps=None):
     ("remind me to revise normalization at 9 pm", "reminders.set",
      {"text": "revise normalization"}),
     ("remind me in 20 minutes to stretch", "reminders.set",
-     {"text": "stretch", "minutes": 20}),
+     {"text": "stretch", "seconds": 20 * 60}),
     ("mujhe 10 minute baad yaad dilana ki paani peena hai", "reminders.set",
-     {"text": "paani peena hai", "minutes": 10}),
+     {"text": "paani peena hai", "seconds": 10 * 60}),
     ("what are my reminders", "reminders.list", {}),
     ("cancel the normalization reminder", "reminders.cancel", {"fragment": "normalization"}),
     ("what do you know about me", "knowledge.list", {}),
@@ -315,3 +372,101 @@ def test_quick_action_grid_is_fully_wired():
     commands = re.findall(r"command: '([^']+)'", source.read_text(encoding="utf-8"))
     assert len(commands) == 9
     assert commands == [text for text, _ in QUICK_ACTIONS]
+
+
+# ------------------------------------------------------- sub-minute alarms
+# "Set an alarm 4 seconds from now" used to become a one-minute reminder, because
+# relative offsets were rounded to minutes, and the word 'alarm' sent it to the
+# phone bridge instead, which only understands an hour and a minute.
+@pytest.mark.parametrize("text,seconds", [
+    ("set an alarm of 4 seconds from now", 4),
+    ("set an alarm in 45 seconds", 45),
+    ("remind me in 30 seconds to check the compile", 30),
+    ("alarm 10 second baad", 10),
+    ("set an alarm in two minutes", 120),
+])
+def test_second_offsets_survive_the_planner(planner, text, seconds):
+    plan = asyncio.run(planner.plan(text))
+    assert plan.tool == "reminders.set", f"{text} became {plan.tool} {plan.args}"
+    assert plan.args.get("seconds") == seconds, f"{text} became {plan.args}"
+
+
+@pytest.mark.parametrize("text", [
+    "set an alarm of 4 seconds from now",
+    "alarm 10 second baad",
+])
+def test_a_duration_alarm_never_reaches_the_phone(planner, text):
+    plan = asyncio.run(planner.plan(text))
+    assert plan.tool != "phone.alarm", f"{text} needs the paired phone: {plan.tool} {plan.args}"
+
+
+def test_a_clock_alarm_still_goes_to_the_phone(planner):
+    plan = asyncio.run(planner.plan("set an alarm for 7 am"))
+    assert plan.tool == "phone.alarm", f"{plan.tool} {plan.args}"
+
+
+def test_a_duration_alarm_remembers_what_it_was_for(planner):
+    plan = asyncio.run(planner.plan("set an alarm of 4 seconds from now to stretch"))
+    assert plan.args["text"].lower() == "stretch", plan.args
+
+
+def test_seconds_reach_the_store_to_the_second(services, planner):
+    from datetime import datetime
+
+    plan = asyncio.run(planner.plan("set an alarm of 4 seconds from now to stretch"))
+    _, task = asyncio.run(run_task(services.executor, services.repo, plan, "alarm"))
+    assert task["status"] == "completed", task["error"]
+    stored = [row for row in services.repo.list_reminders() if row["text"] == "stretch"]
+    assert stored, "the alarm was not saved"
+    due = datetime.fromisoformat(stored[0]["due_at"])
+    lead = (due - datetime.now()).total_seconds()
+    assert 2 < lead <= 5, f"expected a ~4 second lead, got {lead}"
+
+
+def test_setting_a_reminder_wakes_the_scheduler(services):
+    """The creation event has to be published, or an alarm set during a 15-second
+    sleep waits for the sweep instead of ringing on time."""
+    queue = services.bus.subscribe()
+    try:
+        plan = asyncio.run(Planner(
+            services.settings, services.repo, services.registry, OfflineRouter()
+        ).plan("set an alarm of 30 seconds from now to blink"))
+        asyncio.run(run_task(services.executor, services.repo, plan, "alarm"))
+        kinds = set()
+        while not queue.empty():
+            kinds.add(queue.get_nowait()["type"])
+        assert "reminder.created" in kinds, kinds
+    finally:
+        services.bus.unsubscribe(queue)
+
+
+def test_the_scheduler_rings_a_two_second_alarm_promptly(services):
+    from datetime import datetime, timedelta
+
+    from scheduler import ReminderScheduler
+
+    repo = services.repo
+    due = repo.add_reminder(
+        "ring now",
+        (datetime.now() + timedelta(seconds=2)).isoformat(timespec="seconds"),
+        speak=False, source="test",
+    )
+    scheduler = ReminderScheduler(repo, services.bus, tick=15.0)
+
+    async def flow():
+        import time
+
+        scheduler.start()
+        started = time.monotonic()
+        rang = False
+        for _ in range(400):
+            await asyncio.sleep(0.02)
+            if repo.get_reminder(due["id"])["fired"]:
+                rang = True
+                break
+        await scheduler.stop()
+        return time.monotonic() - started, rang
+
+    elapsed, rang = asyncio.run(flow())
+    assert rang, "the alarm never fired"
+    assert elapsed < 5.0, f"a 2-second alarm took {elapsed:.1f}s (the tick is 15s)"

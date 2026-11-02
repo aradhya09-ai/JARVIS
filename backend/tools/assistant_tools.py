@@ -267,7 +267,8 @@ def build() -> list[ToolDefinition]:
             args_model=MemoryForgetArgs,
             risk=Risk.MODERATE,
             handler=memory_forget_handler,
-            confirm=False,
+            # One named key is a correction; an omitted key erases the whole store.
+            confirm_when=lambda args, settings: not args.key,
             category="memory",
         ),
         ToolDefinition(

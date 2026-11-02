@@ -114,3 +114,83 @@ def test_a_refused_launch_is_not_recorded_as_a_completed_action(services):
     after = len([row for row in services.repo.list_audit(200)
                  if row["action"] == "app.open" and row["outcome"] == "ok"])
     assert after == before, "a launch that never happened must not appear in the audit trail"
+
+
+def test_screenshot_reports_the_file_it_saved(tmp_path, monkeypatch):
+    """The capture worked; only the reporting line after it raised NameError, because
+    Path was imported inside capture() and used in the outer handler scope.
+
+    Pillow is faked so no test run photographs the real desktop, and open_path is
+    faked so no test run pops an image viewer on the developer's screen. The fake
+    capture still writes a file: the regression sat after the save, not during it.
+    """
+    from PIL import ImageGrab
+
+    import paths as paths_module
+    from tools.system_monitor import ScreenshotArgs, _screenshot_handler
+
+    class FakeImage:
+        width, height = 8, 6
+
+        def save(self, target, fmt):
+            Path(target).write_bytes(b"\x89PNG\r\n\x1a\n fake")
+
+    opened_targets: list[Path] = []
+    monkeypatch.setattr(ImageGrab, "grab", lambda **kwargs: FakeImage())
+    monkeypatch.setattr(
+        paths_module, "open_path",
+        lambda path: (opened_targets.append(path), (True, f"Opened {path.name}"))[1],
+    )
+    settings, repo = _fresh_env(tmp_path)
+    repo.set_setting("paths.screenshots", str(tmp_path / "shots"))
+    ctx = ToolContext(settings=settings, repo=repo, policy=None, audit=None, bus=None)
+
+    result = asyncio.run(_screenshot_handler(ScreenshotArgs(), ctx))
+
+    assert result.ok, result.error
+    saved = Path(result.data["path"])
+    assert saved.exists(), "the summary claimed a file that was never written"
+    assert opened_targets == [saved], "a successful capture must open itself automatically"
+    assert result.data["opened"] is True
+    assert "\\" not in result.summary and str(tmp_path) not in result.summary, \
+        "the reply must not read a path aloud"
+    assert result.summary == "Executed.", result.summary
+    assert repo.latest_artifact("screenshot")["path"] == str(saved)
+
+
+def test_the_screenshot_confirmation_is_written_in_english():
+    """The confirmation is read aloud, so "system.screenshot (moderate risk) with {}"
+    was a tool id being spoken as though it were a sentence."""
+    from executor import _describe
+
+    assert _describe("system.screenshot", {}, "moderate") == \
+        "Take a screenshot and open it on screen"
+
+
+def test_no_confirmable_action_falls_through_to_the_args_dump():
+    """The confirmation sentence is spoken aloud, so a tool without a label made
+    JARVIS read "docs.create_presentation (moderate risk) with {'slides': 8, ...}"
+    as though it were English. Every action that pauses for approval now owns a
+    sentence, and this test fails when one is added without it."""
+    from executor import _describe
+    from tools import build_registry
+
+    silent = [d.name for d in build_registry().all()
+              if d.risk.value in ("moderate", "high")
+              and ("{" in (text := _describe(d.name, {}, d.risk.value))
+                   or "risk)" in text or "risk):" in text)]
+    assert silent == [], f"no plain sentence for {silent}"
+
+
+def test_a_search_by_name_alone_needs_no_extension(services):
+    """files.search died on extension=None, so the common request "find my
+    screenshots" crashed instead of answering. The reply also has to name the
+    folder, not read an absolute path aloud."""
+    from tools.file_manager import SearchArgs, search_handler
+
+    result = asyncio.run(
+        search_handler(SearchArgs(folder="Downloads", query="report"), _context(services))
+    )
+
+    assert result.ok, result.error
+    assert str(Path.home()) not in result.summary, result.summary

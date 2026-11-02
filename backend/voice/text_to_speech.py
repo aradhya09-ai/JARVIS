@@ -21,6 +21,8 @@ import wave
 from io import BytesIO
 from pathlib import Path
 
+from voice.audio_shape import STYLES, shape
+
 # $args[0] = wav out, $args[1] = text file, $args[2] = preferred voice name
 # ("" for the engine default), $args[3] = listing file (voice enumeration mode),
 # $args[4] = rate (-10..10), $args[5] = pitch (-10..10).  Listing mode is how
@@ -242,7 +244,8 @@ class TextToSpeech:
 
     async def synthesize(self, text: str, language: str | None = None,
                          voice_name: str | None = None, *,
-                         rate: int = 0, pitch: int = 0) -> tuple[bytes, dict[str, object]]:
+                         rate: int = 0, pitch: int = 0,
+                         style: str = "jarvis") -> tuple[bytes, dict[str, object]]:
         """Return (wav_bytes, info). info records the route actually taken."""
         status = self.availability()
         if not status["available"]:
@@ -259,6 +262,7 @@ class TextToSpeech:
             "voice": voice_name or "auto",
             "rate": _bounded(rate),
             "pitch": _bounded(pitch),
+            "style": style if style in STYLES else "clear",
         }
 
         spoken = cleaned
@@ -295,6 +299,10 @@ class TextToSpeech:
                     "then enable its speech option."
                 )
             raise RuntimeError("Windows TTS produced silent audio for this text.")
+
+        # Shaping happens after the silence check: a silent clip must still
+        # raise, and EQ cannot rescue an engine failure.
+        audio = shape(audio, str(info["style"]))
 
         if wants_hindi and info["romanized"]:
             info["note"] = (

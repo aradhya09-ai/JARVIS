@@ -149,6 +149,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "voice.auto_listen": False,
     "voice.rate": 0,
     "voice.pitch": 0,
+    "voice.style": "jarvis",
     "reminders.enabled": True,
     "privacy.memory_enabled": True,
     "privacy.task_history": True,
@@ -318,6 +319,15 @@ class Repository:
             merged[row["key"]] = _loads(row["value"], None)
         return merged
 
+    def public_settings(self) -> dict[str, Any]:
+        """Everything the interface may show: the signing secret stays inside.
+
+        ``security.salt`` is the HMAC key behind device pairing, so a page that
+        can read settings could mint its own token with it.
+        """
+        return {key: value for key, value in self.all_settings().items()
+                if not key.startswith("security.")}
+
     # -------------------------------------------------------------- messages
     def add_message(self, role: str, content: str, task_id: str | None = None) -> dict[str, Any]:
         now = utc_now()
@@ -385,6 +395,15 @@ class Repository:
     def get_task(self, task_id: str) -> dict[str, Any] | None:
         row = self.db.query_one("SELECT * FROM tasks WHERE id = ?", (task_id,))
         return _task_row(row) if row else None
+
+    def confirmation_token(self, task_id: str) -> str | None:
+        """Read the approval token without putting it in any task row.
+
+        Only the executor, which is about to compare it, is allowed to see this.
+        """
+        row = self.db.query_one(
+            "SELECT confirmation_token FROM tasks WHERE id = ?", (task_id,))
+        return row["confirmation_token"] if row else None
 
     def list_tasks(self, limit: int = 40, status: str | None = None) -> list[dict[str, Any]]:
         if status:
@@ -713,6 +732,15 @@ class Repository:
         )
         return [_reminder_row(row) or {} for row in rows]
 
+    def next_reminder_due(self) -> str | None:
+        """The soonest pending due-time, so the loop sleeps exactly that long
+        instead of waking on a fixed tick."""
+        row = self.db.query_one(
+            "SELECT due_at FROM reminders WHERE cancelled = 0 AND fired = 0 "
+            "ORDER BY due_at LIMIT 1"
+        )
+        return str(row["due_at"]) if row else None
+
     def mark_reminder_fired(self, reminder_id: int) -> None:
         self.db.execute(
             "UPDATE reminders SET fired = 1, fired_at = ? WHERE id = ?", (utc_now(), reminder_id)
@@ -783,6 +811,9 @@ class Repository:
 
 def _task_row(row: dict[str, Any]) -> dict[str, Any]:
     task = dict(row)
+    # Tasks are SELECT *, so the approval token has to come out here or it rides
+    # along in /api/tasks, the socket snapshot and every task.updated event.
+    task.pop("confirmation_token", None)
     task["args"] = _loads(task.pop("args_json", None), {})
     task["result"] = _loads(task.pop("result_json", None), None)
     task["cancel_requested"] = bool(task.get("cancel_requested"))

@@ -24,7 +24,6 @@ export interface Task {
   started_at: string | null;
   finished_at: string | null;
   cancel_requested: boolean;
-  confirmation_token?: string | null;
 }
 
 export interface TaskEvent {

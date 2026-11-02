@@ -18,6 +18,7 @@ from events import EventBus
 logger = logging.getLogger("jarvis.reminders")
 
 TICK_SECONDS = 15.0
+MIN_SLEEP = 0.05
 
 
 def _local_now() -> datetime:
@@ -55,12 +56,47 @@ class ReminderScheduler:
 
     async def _loop(self) -> None:
         self._sweep(startup=True)  # anything due while the app was closed
+        inbox = self.bus.subscribe()
+        try:
+            while True:
+                await self._wait_for_next(inbox)
+                try:
+                    self._sweep()
+                except Exception:  # noqa: BLE001 - one bad row must not kill the loop
+                    logger.exception("Reminder sweep failed")
+        finally:
+            self.bus.unsubscribe(inbox)
+
+    async def _wait_for_next(self, inbox: asyncio.Queue[dict[str, Any]]) -> None:
+        """Sleep until the soonest reminder is due, or until a new one arrives.
+
+        A fixed tick is the wrong resolution for 'ring in 4 seconds': it would
+        deliver up to 15 seconds late. The tick stays as the ceiling so a
+        far-off reminder still costs only the usual periodic check, and as the
+        safety net if a creation event is ever missed.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._sleep_seconds()
         while True:
-            await asyncio.sleep(self.tick)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
             try:
-                self._sweep()
-            except Exception:  # noqa: BLE001 - one bad row must not kill the loop
-                logger.exception("Reminder sweep failed")
+                event = await asyncio.wait_for(inbox.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return
+            if event.get("type") == "reminder.created":
+                deadline = min(deadline, loop.time() + self._sleep_seconds())
+
+    def _sleep_seconds(self) -> float:
+        # With reminders off the sweep deliberately ignores every row, so waking
+        # for a due time would spin at MIN_SLEEP and deliver nothing.
+        if not self.repo.get_setting("reminders.enabled", True):
+            return self.tick
+        moment = _parse(self.repo.next_reminder_due())
+        if moment is None:
+            return self.tick
+        return max(MIN_SLEEP, min(self.tick, (moment - _local_now()).total_seconds()))
 
     def _sweep(self, startup: bool = False) -> list[dict[str, Any]]:
         if not self.repo.get_setting("reminders.enabled", True):

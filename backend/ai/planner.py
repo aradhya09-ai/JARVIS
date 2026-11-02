@@ -67,6 +67,35 @@ SEARCH_ENGINES = {"youtube": "youtube", "amazon": "amazon", "github": "github",
                   "google": "google", "bing": "bing"}
 ENGINE_PHRASES = sorted(SEARCH_ENGINES, key=len, reverse=True)
 
+# Boundaries between back-to-back commands, including the Hinglish conjunctions.
+CLAUSE_SPLIT = re.compile(
+    r"\s*(?:and\s+then|and\s+ke\s+baad|then|,|;|\band\b|\baur\b|\bphir\b|\bplus\b)\s*", re.I)
+CLAUSE_FILLER = re.compile(r"^(?:please|kindly|now|also|just|ek|for me)\s+", re.I)
+# A clause that only points at something ("open it") is not a new command, and
+# guessing which earlier object it meant would run the wrong tool.
+PRONOUN_OBJECT = re.compile(
+    r"\b(?:it|they|them|that|this|these|those|there|us|ye|yeh|woh|woo|iska|uska|"
+    r"unhe|isime|usme|wahan)\b", re.I)
+
+
+def _norm(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+def _is_extra(step: dict[str, Any], tools: set[str], named: set[str]) -> bool:
+    """Whether a clause asks for something the whole-sentence plan left out.
+
+    A rule that fuses clauses already names their objects: 'open Chrome and
+    search for recursion' becomes one browser search whose browser argument is
+    Chrome, so nothing is missing. A rule that matched a substring is silent
+    about the other clauses, and its own tool cannot stand in for them.
+    """
+    if str(step.get("tool") or "") in tools:
+        return False
+    entities = {_norm(value) for value in (step.get("args") or {}).values()
+                if isinstance(value, str) and value.strip()}
+    return not entities or not entities <= named
+
 
 @dataclass
 class Plan:
@@ -232,13 +261,14 @@ REMINDER_TRIGGER = (r"\bremind(?:s|er|ers)?\b|\byaad\s+dil\w*|\bdilva\s*de\b|"
                     r"\bdhila\s*dene\b")
 
 RELATIVE_UNITS = {
-    "second": 0, "sec": 0, "secs": 0, "minute": 1, "minutes": 1, "min": 1, "mins": 1,
-    "ghanta": 60, "ghante": 60, "hour": 60, "hours": 60, "hr": 60, "hrs": 60,
-    "din": 1440, "day": 1440, "days": 1440, "week": 10080, "weeks": 10080,
+    # Offsets are seconds, so "in 4 seconds" survives; rounded to minutes it became 1.
+    "second": 1, "sec": 1, "secs": 1, "minute": 60, "minutes": 60, "min": 60, "mins": 60,
+    "ghanta": 3600, "ghante": 3600, "hour": 3600, "hours": 3600, "hr": 3600, "hrs": 3600,
+    "din": 86400, "day": 86400, "days": 86400, "week": 604800, "weeks": 604800,
 }
 RELATIVE_PATTERN = re.compile(
     r"\b(?:in|after)?\s*(\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten|"
-    r"eleven|twelve|fifteen|twenty|thirty|forty|sixty)\s*(second|secs?|minutes?|mins?|"
+    r"eleven|twelve|fifteen|twenty|thirty|forty|sixty)\s*(seconds?|secs?|minutes?|mins?|"
     r"ghante?|hours?|hrs?|din|days?|weeks?)\b(?:\s*(?:baad|se|ke\s+baad))?",
     re.I,
 )
@@ -263,9 +293,9 @@ CLOCK_PHRASE = re.compile(    r"(?:\b(?:at|around|by|ko)\s+(?:\d{1,2}(?::\d{2})?
 
 
 def _reminder_relative(text: str) -> int | None:
-    """Minutes into the future for 'in 20 minutes' / '10 minute baad' / 'half an hour'."""
+    """Seconds into the future for 'in 20 minutes' / 'in 4 seconds' / '4 minute baad'."""
     if re.search(r"\bhalf\s+an?\s+hour\b", text, re.I):
-        return 30
+        return 30 * 60
     match = RELATIVE_PATTERN.search(text)
     if not match:
         return None
@@ -277,10 +307,10 @@ def _reminder_relative(text: str) -> int | None:
             return None
     unit = match.group(2).lower().rstrip("s")
     unit = {"min": "minute", "sec": "second", "hr": "hour", "ghanta": "ghanta"}.get(unit, unit)
-    minutes = RELATIVE_UNITS.get(unit, None)
-    if minutes is None:
+    unit_seconds = RELATIVE_UNITS.get(unit, None)
+    if unit_seconds is None or count <= 0:
         return None
-    return max(1, count * minutes) if minutes else max(1, round(count / 60))
+    return max(1, count * unit_seconds)
 
 
 def _daypart_hour(text: str, hour: int) -> tuple[int, bool]:
@@ -350,6 +380,11 @@ def _reminder_body(text: str) -> str:
     body = re.sub(r"\bremind\s+(?:me|mujhe|muje)\b(?:\s+(?:to|about|that|ka|ki))?\s*",
                   " ", body, flags=re.I)
     body = re.sub(r"\b(?:mujhe|muje|mai|main)\b", " ", body, flags=re.I)
+    body = re.sub(r"\b(?:set|put|make|keep|lag[aā]o|de)\s+(?:up\s+)?"
+                  r"(?:an?\s+|ek\s+|apn[aā]\s+)?alarms?\b"
+                  r"(?:\s+(?:of|for|to|ke\s+liye|ko))?\s*", " ", body, flags=re.I)
+    body = re.sub(r"\balarms?\b", " ", body, flags=re.I)
+    body = re.sub(r"\b(?:from\s+now|se\s+abhi|abhi\s+se|abhi)\b", " ", body, flags=re.I)
     body = re.sub(r"\bset\s+(?:up\s+)?(?:a\s+|ek\s+)?reminders?\b(?:\s+(?:to|for|about))?\s*",
                   " ", body, flags=re.I)
     body = re.sub(r"\breminders?\b", " ", body, flags=re.I)
@@ -457,13 +492,12 @@ class Planner:
         cleaned = self._clean(text)
         if not cleaned:
             return Plan(reply="Yes? Give me a command.", planner="rules")
-        for rule in self._rules:
-            try:
-                plan = rule(cleaned)
-            except Exception:  # noqa: BLE001 - a bad rule must not break planning
-                plan = None
-            if plan:
-                return plan
+        single = self._first_rule(cleaned)
+        compound = self._compound(cleaned, single)
+        if compound:
+            return compound
+        if single:
+            return single
         model_plan, failure = await self._model_plan(cleaned, history or [])
         if model_plan:
             return model_plan
@@ -478,6 +512,62 @@ class Planner:
                 "'make a presentation on AI', or 'what can you do?'."
             ),
             planner="fallback",
+        )
+
+    def _first_rule(self, text: str) -> Plan | None:
+        for rule in self._rules:
+            try:
+                plan = rule(text)
+            except Exception:  # noqa: BLE001 - a bad rule must not break planning
+                plan = None
+            if plan:
+                return plan
+        return None
+
+    def _compound(self, text: str, single: Plan | None) -> Plan | None:
+        """Run every clause of "open Chrome, mute the sound and screenshot".
+
+        A rule matches the whole sentence and the first one that fits wins, so
+        the actions after it were dropped in silence. Each clause is planned on
+        its own, and the split is used only when every clause names an action
+        the rules understand and the whole-sentence plan still left something
+        out. That leaves an ordinary sentence alone: "what is the time and date"
+        has a clause that is a question, "create a folder and open it" has a
+        clause that is only a pronoun, and "open Chrome and search for
+        recursion" really is one browser search that already names Chrome.
+        """
+        clauses = [CLAUSE_FILLER.sub("", piece).strip(" .,!?")
+                   for piece in CLAUSE_SPLIT.split(text)]
+        clauses = [clause for clause in clauses if clause]
+        if not 2 <= len(clauses) <= 4:
+            return None
+        if any(PRONOUN_OBJECT.search(clause) for clause in clauses):
+            return None
+        steps: list[dict[str, Any]] = []
+        for clause in clauses:
+            plan = self._first_rule(clause)
+            if not plan or plan.kind != "tool" or not plan.is_tool:
+                return None
+            for step in plan.sequence():
+                if step not in steps:
+                    steps.append(step)
+        if len(steps) < 2:
+            return None
+        planned = single.sequence() if single else []
+        tools = {str(step.get("tool") or "") for step in planned}
+        named = {_norm(value) for step in planned
+                 for value in (step.get("args") or {}).values()
+                 if isinstance(value, str) and value.strip()}
+        if not any(_is_extra(step, tools, named) for step in steps):
+            return None
+        return Plan(
+            kind="tool",
+            tool=steps[0]["tool"],
+            args=dict(steps[0]["args"]),
+            steps=steps[1:],
+            intent="compound",
+            planner="rules",
+            explanation=" and ".join(clauses),
         )
 
     def _clean(self, text: str) -> str:
@@ -576,14 +666,14 @@ class Planner:
             return self._tool("reminders.list", {}, "reminder_list")
         if re.search(r"\b(what|where)\b.*\breminders?\b", text, re.I):
             return self._tool("reminders.list", {}, "reminder_list")
-        minutes = _reminder_relative(text)
-        if minutes is not None:
+        offset = _reminder_relative(text)
+        if offset is not None:
             body = _reminder_body(text)
             if not body:
                 return self._reply("Remind you to do what?", "reminder")
             return self._tool(
-                "reminders.set", {"text": body[:300], "minutes": minutes}, "reminder_set",
-                explanation=f"Reminder in {minutes} minute(s): {body}",
+                "reminders.set", {"text": body[:300], "seconds": offset}, "reminder_set",
+                explanation=f"Reminder in {offset} second(s): {body}",
             )
         moment, reason = _reminder_moment(text, datetime.now())
         if reason == "ambiguous":
@@ -635,6 +725,15 @@ class Planner:
             return self._reply(
                 "Cancelling an alarm is not exposed by the phone bridge yet; open the Clock app "
                 "on your phone to remove it.", "alarm"
+            )
+        # 'an alarm in 4 seconds' is a JARVIS timer, not a phone-clock entry:
+        # the bridge only accepts an hour and a minute and needs the phone paired.
+        offset = _reminder_relative(text)
+        if offset is not None and not CLOCK_PHRASE.search(text):
+            body = _reminder_body(text) or "Alarm"
+            return self._tool(
+                "reminders.set", {"text": body[:300], "seconds": offset}, "alarm",
+                explanation=f"Alarm in {offset} second(s): {body}",
             )
         hour, minute, ambiguous = _parse_clock(text)
         if hour is None:

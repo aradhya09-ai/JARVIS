@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+from pathlib import Path
 from typing import Any
 
 from ai.planner import Plan
@@ -21,9 +22,44 @@ ACTIVE_STATUSES = {"pending", "running", "awaiting_confirmation"}
 RISK_ORDER = {"low": 0, "moderate": 1, "high": 2}
 
 
+def _folder(args: dict[str, Any], key: str = "folder") -> str:
+    """The folder's name, never its absolute path — this text is read aloud."""
+    return Path(str(args.get(key, ""))).name or "that folder"
+
+
 def _describe(tool: str, args: dict[str, Any], risk: str) -> str:
+    """One plain sentence per action, for the card he approves and for the voice
+    that reads it. A raw args dict is not a sentence: "docs.create_presentation
+    (moderate risk) with {'topic': ...}" was being spoken aloud word by word."""
+    if tool == "system.screenshot":
+        return "Take a screenshot and open it on screen"
+    if tool == "system.lock":
+        return "Lock your screen"
     if tool == "app.close":
         return f"Close {args.get('name', 'the application')}"
+    if tool == "image.generate":
+        return f"Generate an image of \"{str(args.get('prompt', ''))[:80]}\""
+    if tool == "docs.create_presentation":
+        return (f"Write a {args.get('slides', 8)}-slide presentation on "
+                f"{args.get('topic', 'the topic')}")
+    if tool == "code.create_project":
+        kind = str(args.get("kind", "calculator")).replace("_", " ")
+        return f"Create a {kind} project and open it in VS Code"
+    if tool == "shortcuts.open":
+        return f"Open {args.get('name')} from your shortcuts"
+    if tool == "tasks.cancel":
+        return "Stop the task that is running right now"
+    if tool == "memory.forget":
+        key = args.get("key")
+        return f"Forget the memory {key}" if key else "Delete every memory I have stored"
+    if tool == "files.move":
+        name = Path(str(args.get("source", ""))).name
+        return f"Move {name} into {_folder(args, 'destination_folder')}"
+    if tool == "files.rename":
+        return (f"Rename {Path(str(args.get('path', ''))).name} to "
+                f"{args.get('new_name', 'a new name')}")
+    if tool == "files.create_folder":
+        return f"Create a folder called {args.get('name', 'new folder')}"
     if tool == "phone.whatsapp":
         message = args.get("message", "")
         return (
@@ -37,12 +73,15 @@ def _describe(tool: str, args: dict[str, Any], risk: str) -> str:
     if tool == "phone.reels_start":
         return "Enable the accessibility auto-scroll for reels. You can stop it at any time."
     if tool == "files.organize_apply":
-        return f"Move loose files in {args.get('folder')} into category folders."
+        return f"Move loose files in {_folder(args)} into category folders."
     if tool == "files.undo_organize":
-        return f"Restore the previous layout of {args.get('folder')}."
+        return f"Restore the previous layout of {_folder(args)}."
     if tool == "code.run_tests":
-        return f"Execute the unit tests in {args.get('project_dir')}."
-    return f"{tool} ({risk} risk) with {args}"
+        return f"Execute the unit tests in {_folder(args, 'project_dir')}."
+    detail = ", ".join(
+        f"{key} {value}" for key, value in args.items() if value not in (None, "", False)
+    )
+    return f"{tool} ({risk} risk): {detail}" if detail else f"{tool} ({risk} risk)"
 
 
 def _sequence_of(task: dict[str, Any]) -> list[dict[str, Any]]:
@@ -137,7 +176,8 @@ class TaskExecutor:
         # One confirmation covers the sequence: if any step needs approval, the
         # preview names every step so the user is not asked twice or surprised later.
         needs_confirmation = any(
-            self.registry.requires_confirmation(d.name, self.policy) for d, _ in steps
+            self.registry.requires_confirmation(d.name, self.policy, a, self.settings)
+            for d, a in steps
         )
         risk = max((d.risk.value for d, _ in steps), key=lambda r: RISK_ORDER.get(r, 99))
         token = secrets.token_urlsafe(18) if needs_confirmation else None
@@ -158,10 +198,11 @@ class TaskExecutor:
                 task["id"],
             )
             self._publish_message(message)
-            self.bus.publish("confirmation.required", {"task": task, "summary": summary})
+            self.bus.publish("confirmation.required",
+                             {"task": task, "summary": summary, "token": token})
             return {
                 "type": "task", "task": task, "requires_confirmation": True,
-                "confirmation": self._confirmation_payload(task),
+                "confirmation": self._confirmation_payload(task, token),
                 "reply": f"Confirmation required: {summary}", "message": message,
             }
 
@@ -171,12 +212,13 @@ class TaskExecutor:
                 "requires_confirmation": False, "confirmation": None,
                 "reply": f"Working on: {text}"}
 
-    def _confirmation_payload(self, task: dict[str, Any]) -> dict[str, Any] | None:
+    def _confirmation_payload(self, task: dict[str, Any],
+                              token: str | None = None) -> dict[str, Any] | None:
         if task.get("status") != "awaiting_confirmation":
             return None
         return {
             "task_id": task["id"],
-            "token": task.get("confirmation_token"),
+            "token": token if token is not None else self.repo.confirmation_token(task["id"]),
             "summary": _describe_plan(_sequence_of(task), self.registry),
             "risk": task.get("risk"),
         }
@@ -188,9 +230,8 @@ class TaskExecutor:
             return None
         if task["status"] != "awaiting_confirmation":
             return {"error": f"Task is {task['status']}, not awaiting confirmation."}
-        if not task.get("confirmation_token") or not secrets.compare_digest(
-            task["confirmation_token"], token
-        ):
+        stored = self.repo.confirmation_token(task_id)
+        if not stored or not secrets.compare_digest(stored, token):
             return {"error": "Confirmation token is invalid."}
         try:
             for step in _sequence_of(task):
@@ -319,12 +360,13 @@ class TaskExecutor:
                 parts.append(failure.rstrip(".!?"))
             if not parts:
                 parts.append("Nothing was executed")
-            report = ". ".join(parts)
+            # Each step already names what it did, so the join is the whole
+            # report; "all 3 steps done" afterwards is words over words. A run
+            # that stopped short still has to say how far it got.
+            report = ". ".join(parts) + "."
             if not succeeded:
                 done = sum(1 for o in outcomes if o["ok"])
-                report += f". {done} of {len(sequence)} step(s) succeeded."
-            else:
-                report += f". All {len(sequence)} steps done."
+                report += f" {done} of {len(sequence)} steps finished."
 
         stored = (outcomes[0]["data"] if len(outcomes) == 1 and succeeded and not multi
                   else {"steps": outcomes, "steps_completed": len(outcomes),

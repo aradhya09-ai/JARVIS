@@ -100,7 +100,7 @@ class PresentationArgs(BaseModel):
     slides: int = Field(default=8, ge=4, le=20)
     audience: str = Field(default="general audience", max_length=120)
     style: str = Field(default="professional", max_length=60)
-    open_after: bool = False
+    open_after: bool = True
     filename: str | None = Field(default=None, max_length=120)
 
 
@@ -398,14 +398,16 @@ async def presentation_handler(args: PresentationArgs, ctx: ToolContext) -> Tool
     opened: dict[str, Any] = {"opened": False, "reason": "Open in PowerPoint was not requested."}
     if args.open_after:
         opened = await asyncio.to_thread(_open_in_powerpoint, ctx, destination)
-    summary = (
-        f"Created a {count}-slide presentation on {args.topic} at {destination}. "
-        f"The outline came from a {source_note}; no web research was performed."
+    # No folder is read out: the deck opening on screen is the confirmation. The
+    # outline's origin stays in the reply because a template deck is not a drafted one.
+    summary = f"Executed. {count} slides on {args.topic}"
+    summary += (
+        " from a plain template — no model outline was available."
+        if source_note.startswith("structural template")
+        else "."
     )
-    if args.open_after:
-        summary += " PowerPoint opened it." if opened.get("opened") else (
-            " PowerPoint could not be opened: " + str(opened.get("reason"))
-        )
+    if args.open_after and not opened.get("opened"):
+        summary += " PowerPoint did not open it."
     return ToolResult.success(summary, path=str(destination), slides=count,
                               outline_source=source_note, opened=opened)
 

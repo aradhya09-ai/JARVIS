@@ -30,6 +30,13 @@ const LANGUAGE_OPTIONS = [
 
 const VOICE_SAMPLE = 'Namaste Aradhya, main JARVIS hoon.';
 
+// Mirrors STYLES in backend/voice/audio_shape.py.
+const VOICE_STYLES = [
+  { value: 'jarvis', label: 'JARVIS — deep and present' },
+  { value: 'clear', label: 'Clear — brightest, best for Hindi' },
+  { value: 'off', label: 'Off — exactly what Windows produces' },
+];
+
 interface SapiVoiceInfo {
   voices: { name: string; culture: string }[];
   hindi_available: boolean;
@@ -346,6 +353,25 @@ export function SettingsPanel({
               {sapi === null
                 ? 'Could not read the installed Windows voices.'
                 : sapi.note}
+            </small>
+          </label>
+          <label className="field">
+            <span>Voice character</span>
+            <select
+              value={str('voice.style', 'jarvis')}
+              onChange={(event) => void patch('voice.style', event.target.value, 'style')}
+              disabled={!online || !health?.voice.backend_tts.available}
+            >
+              {VOICE_STYLES.map((style) => (
+                <option key={style.value} value={style.value}>
+                  {style.label}
+                </option>
+              ))}
+            </select>
+            <small>
+              {health?.voice.backend_tts.available
+                ? 'Windows ignores the voice’s own pitch setting, so the tone is shaped after synthesis: the low rumble a laptop speaker cannot reproduce is removed and the consonant band is lifted. Applies to every reply, including speaker output.'
+                : 'Applies to the Windows voice only, which is not available now.'}
             </small>
           </label>
           <div className="field">

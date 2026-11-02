@@ -67,6 +67,9 @@ class ToolContext:
 
 
 ToolHandler = Callable[[BaseModel, ToolContext], Awaitable[ToolResult]]
+# Decides approval from the arguments themselves, because one tool can hold two
+# different risks: "forget my favourite colour" and "forget everything".
+ConfirmWhen = Callable[[BaseModel, Any], bool]
 
 
 @dataclass
@@ -77,6 +80,7 @@ class ToolDefinition:
     risk: Risk
     handler: ToolHandler
     confirm: bool | None = None
+    confirm_when: ConfirmWhen | None = None
     category: str = "general"
 
     def schema(self) -> dict[str, Any]:
@@ -137,9 +141,15 @@ class ToolRegistry:
             ) from exc
 
     def requires_confirmation(
-        self, name: str, policy: PermissionPolicy
+        self,
+        name: str,
+        policy: PermissionPolicy,
+        args: BaseModel | None = None,
+        settings: Any = None,
     ) -> bool:
         tool = self.get(name)
+        if tool.confirm_when is not None and args is not None and settings is not None:
+            return bool(tool.confirm_when(args, settings))
         return policy.requires_confirmation(tool.risk, tool.confirm)
 
     async def execute(

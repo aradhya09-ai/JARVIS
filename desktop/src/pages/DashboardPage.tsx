@@ -45,6 +45,11 @@ export function DashboardPage({
           voice.toggle();
         }}
       />
+      {voice.subtitle && (
+        <p className="home-subtitle" aria-live="polite">
+          {voice.subtitle}
+        </p>
+      )}
       <HomeMenu
         sections={sections}
         online={online}

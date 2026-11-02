@@ -97,6 +97,9 @@ def _synthesize_kwargs(services: Services, payload: TTSRequest) -> dict:
             services.repo.get_setting("voice.rate", 0) or 0),
         "pitch": payload.pitch if payload.pitch is not None else int(
             services.repo.get_setting("voice.pitch", 0) or 0),
+        # Only a name here, never a filter: the engine ignores Pitch on this
+        # machine, so the character of the voice is decided by the shaping pass.
+        "style": str(services.repo.get_setting("voice.style", "jarvis") or "jarvis"),
     }
 
 

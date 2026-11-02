@@ -45,6 +45,24 @@ def _blocked_roots() -> list[Path]:
     return [resolve_path(p) for p in candidates if p]
 
 
+def _secret_roots(blocked: list[Path]) -> list[Path]:
+    """Where a *read* leaks a secret, as opposed to where a write would persist.
+
+    LOCALAPPDATA itself is not in here: JARVIS renders speech into %TEMP%, which
+    sits under it, so banning the whole tree would refuse the assistant's own
+    files. The browser profile stores are named instead, because that is where
+    saved passwords actually live.
+    """
+    local = os.environ.get("LOCALAPPDATA", "")
+    roots = [path for path in blocked
+             if not (local and is_within(path, resolve_path(local)))]
+    if local:
+        base = resolve_path(local)
+        roots += [base / "Google" / "Chrome" / "User Data",
+                  base / "Microsoft" / "Edge" / "User Data"]
+    return roots
+
+
 class PermissionPolicy:
     """Decides whether an action needs explicit user confirmation."""
 
@@ -53,6 +71,7 @@ class PermissionPolicy:
         self.read_roots = read_roots
         self.write_roots = write_roots
         self._blocked = _blocked_roots()
+        self._secret_paths = _secret_roots(self._blocked)
 
     @property
     def auto_confirm_moderate(self) -> bool:
@@ -69,6 +88,9 @@ class PermissionPolicy:
 
     def ensure_readable(self, path: Path) -> Path:
         resolved = path.resolve()
+        if any(is_within(resolved, blocked) for blocked in self._secret_paths):
+            raise PermissionError_(
+                f"Access denied: {resolved} holds credentials or system files.")
         if not any(is_within(resolved, root) for root in self.read_roots):
             raise PermissionError_(
                 f"Access denied: {resolved} is outside the approved folders. "

@@ -53,7 +53,7 @@ def _validate(key: str, value: Any) -> None:
 @router.get("/settings")
 async def get_settings(services: Services = Depends(get_services)) -> dict:
     return {
-        "settings": services.repo.all_settings(),
+        "settings": services.repo.public_settings(),
         "restart_required_keys": sorted(RESTART_REQUIRED),
         "permissions": services.policy.describe_boundaries(),
         "version": services.settings.version,
@@ -75,7 +75,7 @@ async def patch_settings(payload: SettingsPatch,
             restart.append(key)
     services.audit.record("user", "settings.update", "low",
                           {"keys": sorted(payload.values)}, "ok")
-    return {"settings": services.repo.all_settings(), "restart_required": restart}
+    return {"settings": services.repo.public_settings(), "restart_required": restart}
 
 
 @router.get("/memory")

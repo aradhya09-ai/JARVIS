@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { matchWakeWord, stripWakeWord } from '../lib/wakeWord';
 import { api } from '../services/api';
 
 export interface VoiceOptions {
@@ -162,6 +163,8 @@ export function useVoice(options: VoiceOptions) {
 
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  // The line JARVIS is saying out loud, shown as a subtitle on the home screen.
+  const [subtitle, setSubtitle] = useState('');
   const [wakeActive, setWakeActive] = useState(false);
   const [armed, setArmedState] = useState(false);
   const [level, setLevel] = useState(0);
@@ -206,7 +209,11 @@ export function useVoice(options: VoiceOptions) {
   // response from starting to talk again.
   const speechEpochRef = useRef(0);
   const spokenTextRef = useRef('');
-  const greetedAtRef = useRef(0);
+  // The last wake that was answered, so the recogniser handing the same utterance
+  // back twice does not greet twice. Keyed by the words, not by the clock: a flat
+  // time window also swallowed a genuine second call that came while JARVIS was
+  // still reading the first reply.
+  const lastWakeRef = useRef<{ words: string; at: number }>({ words: '', at: 0 });
   const voicesReadyRef = useRef(false);
   // The command being spoken right now, kept open across pauses so one
   // sentence split into three recognition finals still arrives as one command.
@@ -562,6 +569,7 @@ export function useVoice(options: VoiceOptions) {
       const epoch = ++speechEpochRef.current;
       speakingRef.current = true;
       spokenTextRef.current = clean;
+      setSubtitle(clean);
       setSpeaking(true);
       startLevelLoop();
       setError(null);
@@ -782,10 +790,7 @@ export function useVoice(options: VoiceOptions) {
     setArmed(false);
     if (!dispatch) return;
     const phrase = optionsRef.current.wakePhrase.trim().toLowerCase();
-    const command =
-      phrase && heard.toLowerCase().startsWith(phrase)
-        ? heard.slice(phrase.length).replace(/^[\s,.:;!-]+/, '').trim()
-        : heard;
+    const command = phrase ? stripWakeWord(heard, phrase) : heard;
     if (!command || isFalseEnding(command)) return;
     optionsRef.current.onCommand(command);
   }, [setArmed]);
@@ -964,6 +969,36 @@ export function useVoice(options: VoiceOptions) {
 
       setTranscript(clean);
 
+      const phrase = optionsRef.current.wakePhrase.trim().toLowerCase();
+      if (!phrase) return;
+
+      // The wake word is checked before the "am I talking" branch, because the
+      // old order swallowed it: saying "hey jarvis" while a reply was still being
+      // read out was dropped unless it also matched an interruption phrase, so
+      // the assistant looked deaf exactly when it had just said something.
+      if (!armedRef.current && !heardOwnSpeech(clean)) {
+        const hit = matchWakeWord(clean, phrase);
+        if (hit.matched) {
+          // The same utterance can arrive as two finals; a different sentence is a
+          // new call and must be answered even seconds after the last one.
+          const words = clean.toLowerCase();
+          if (lastWakeRef.current.words === words && Date.now() - lastWakeRef.current.at < 4000) return;
+          lastWakeRef.current = { words, at: Date.now() };
+          if (speakingRef.current) {
+            speechEpochRef.current += 1;
+            stopPlayback();
+            optionsRef.current.onInterrupted?.();
+          }
+          setArmed(true);
+          optionsRef.current.onWake();
+          openTurn();
+          if (hit.remainder) addToTurn(hit.remainder);
+          const greeting = optionsRef.current.wakeGreeting.trim();
+          if (greeting && optionsRef.current.ttsEnabled) void speakRef.current(greeting);
+          return;
+        }
+      }
+
       if (speakingRef.current) {
         if (heardOwnSpeech(clean)) return;
         const interrupted = INTERRUPTION_RE.test(clean);
@@ -984,27 +1019,7 @@ export function useVoice(options: VoiceOptions) {
         return;
       }
 
-      const phrase = optionsRef.current.wakePhrase.trim().toLowerCase();
-      if (!phrase) return;
-      const lower = clean.toLowerCase();
-
-      if (!armedRef.current) {
-        const index = lower.indexOf(phrase);
-        if (index === -1) return;
-        // Repeated recognition events for one utterance must not greet twice.
-        if (Date.now() - greetedAtRef.current < 4000) return;
-        greetedAtRef.current = Date.now();
-        setArmed(true);
-        optionsRef.current.onWake();
-        openTurn();
-        const remainder = clean.slice(index + phrase.length).replace(/^[\s,.:;!-]+/, '').trim();
-        if (remainder) addToTurn(remainder);
-        const greeting = optionsRef.current.wakeGreeting.trim();
-        if (greeting && optionsRef.current.ttsEnabled) void speakRef.current(greeting);
-        return;
-      }
-
-      addToTurn(clean);
+      if (armedRef.current) addToTurn(clean);
     },
     [addToTurn, heardOwnSpeech, openTurn, setArmed, stopPlayback],
   );
@@ -1285,6 +1300,7 @@ export function useVoice(options: VoiceOptions) {
     supported,
     listening,
     speaking,
+    subtitle,
     wakeActive,
     wakeFault,
     micPermission,

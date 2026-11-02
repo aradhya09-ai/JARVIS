@@ -14,6 +14,7 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+import paths
 from security.permissions import Risk
 from tools.base import ToolContext, ToolDefinition, ToolError, ToolResult
 
@@ -131,11 +132,13 @@ async def generate_handler(args: ImageArgs, ctx: ToolContext) -> ToolResult:
     await asyncio.to_thread(destination.write_bytes, payload)
     ctx.audit.record(ctx.actor, "image.generate", Risk.LOW.value,
                      {"provider": provider, "path": str(destination)}, "ok")
-    summary = f"Generated an image with {provider} and saved it to {destination}."
+    # Only the file this handler just wrote is opened, never a path from the model.
+    opened, _ = await asyncio.to_thread(paths.open_path, destination)
+    summary = "Executed." if opened else "Generated, but the viewer did not open."
     if status.get("billing"):
         summary += " " + status["billing"]
     return ToolResult.success(summary, path=str(destination), provider=provider,
-                              bytes=len(payload))
+                              opened=opened, bytes=len(payload))
 
 
 class EmptyArgs(BaseModel):
@@ -157,8 +160,11 @@ def build() -> list[ToolDefinition]:
             name="image.generate",
             description="Generate an image through the configured local or cloud provider.",
             args_model=ImageArgs,
-            risk=Risk.LOW,
+            risk=Risk.MODERATE,
             handler=generate_handler,
+            # Some providers charge per picture, and the user asked to be asked
+            # before anything spends money. A local or unset provider never does.
+            confirm_when=lambda args, settings: settings.image_provider == "openai",
             category="images",
         ),
         ToolDefinition(

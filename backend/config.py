@@ -54,6 +54,30 @@ def _split_paths(raw: str) -> list[Path]:
     return [Path(os.path.expandvars(p.strip())).expanduser() for p in raw.split(";") if p.strip()]
 
 
+def _split_origins(raw: str) -> list[str]:
+    """Browser origins allowed to call the API, on top of the built-in loopback ones.
+
+    A bare "*" is dropped rather than honoured: these tools control a real desktop,
+    so an open CORS policy would let any website the user visits drive them.
+    """
+    origins = []
+    for part in raw.replace(";", ",").split(","):
+        value = part.strip().rstrip("/")
+        if value and value != "*":
+            origins.append(value)
+    return origins
+
+
+def _split_clients(raw: str) -> list[str]:
+    """Addresses allowed to reach the API from outside the machine.
+
+    Empty by default, which keeps the service local-only. Entries are IPs or
+    CIDRs, so a Tailscale address can be named exactly instead of opening the
+    whole carrier range.
+    """
+    return [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+
+
 @dataclass
 class Settings:
     """Process-wide settings. User-editable preferences live in SQLite."""
@@ -67,6 +91,17 @@ class Settings:
     project_root: Path = _env_path("JARVIS_PROJECT_ROOT", HOME / "JARVIS" / "projects")
     extra_roots: list[Path] = field(
         default_factory=lambda: _split_paths(os.environ.get("JARVIS_EXTRA_ROOTS", ""))
+    )
+    # Set this to reach the dashboard from a tunnel host, e.g. a Tailscale Serve
+    # https://<machine>.<tailnet>.ts.net address, without editing source.
+    extra_origins: list[str] = field(
+        default_factory=lambda: _split_origins(os.environ.get("JARVIS_EXTRA_ORIGINS", ""))
+    )
+    # Devices allowed to drive JARVIS from off the machine, as IPs or CIDRs. Empty
+    # keeps the REST API local-only, which is the safe default for a service that
+    # can mute a laptop or launch programs.
+    remote_clients: list[str] = field(
+        default_factory=lambda: _split_clients(os.environ.get("JARVIS_REMOTE_CLIENTS", ""))
     )
 
     ollama_url: str = os.environ.get("JARVIS_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")

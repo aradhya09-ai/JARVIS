@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from security.permissions import Risk
+from security.permissions import Risk, resolve_path
 from tools.application_launcher import resolve_spec
 from tools.base import ToolContext, ToolDefinition, ToolError, ToolResult
 
@@ -480,6 +480,14 @@ async def create_project_handler(args: CreateProjectArgs, ctx: ToolContext) -> T
 async def run_tests_handler(args: RunTestsArgs, ctx: ToolContext) -> ToolResult:
     project_dir = Path(os.path.expandvars(args.project_dir)).expanduser()
     ctx.policy.ensure_writable(project_dir)
+    # `unittest discover` imports every test_*.py it finds, so whichever folder a
+    # model names cannot be the folder Python executes code from.
+    allowed_root = resolve_path(ctx.settings.project_root)
+    if not resolve_path(project_dir).is_relative_to(allowed_root):
+        return ToolResult.failure(
+            f"Tests only run inside the JARVIS project folder: {allowed_root}.",
+            hint="Create or move the project there first.",
+        )
     if not project_dir.is_dir():
         return ToolResult.failure(f"Project folder not found: {project_dir}")
     has_tests = any(project_dir.rglob("test_*.py")) or any(project_dir.rglob("*_test.py"))

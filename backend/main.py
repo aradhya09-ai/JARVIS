@@ -3,13 +3,15 @@
 Run from the ``backend`` directory:
     .\\.venv\\Scripts\\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8765
 
-The REST API accepts loopback clients only and every mutating request must
+The REST API accepts loopback clients - plus any address the user names in
+``JARVIS_REMOTE_CLIENTS`` for a private tunnel - and every mutating request must
 carry ``X-JARVIS-Client: desktop``. The phone companion connects to
 ``/ws/phone`` with a paired device token instead.
 """
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -58,12 +60,43 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5173",
     "http://localhost:8765",
     "http://127.0.0.1:8765",
+    *settings.extra_origins,
 ]
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
 def _is_loopback(host: str | None) -> bool:
     return bool(host) and (host in LOOPBACK_HOSTS or host.startswith("127."))
+
+
+def _named_networks(entries: list[str]) -> list:
+    networks = []
+    for entry in entries:
+        try:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            logger.warning("ignoring JARVIS_REMOTE_CLIENTS entry %r: not an address or range", entry)
+    return networks
+
+
+REMOTE_NETWORKS = _named_networks(settings.remote_clients)
+
+
+def _is_allowed_client(host: str | None) -> bool:
+    """Loopback always; every other address only if the user named it.
+
+    Tailscale Serve forwards the real tailnet address, so a remote device is
+    identified rather than disguised as the local proxy.
+    """
+    if _is_loopback(host):
+        return True
+    if not host or not REMOTE_NETWORKS:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(address in network for network in REMOTE_NETWORKS)
 
 
 def _origin_ok(request: Request | WebSocket) -> bool:
@@ -219,9 +252,12 @@ app.add_middleware(
 async def local_guard(request: Request, call_next):
     client = request.client.host if request.client else ""
     if request.url.path.startswith("/api"):
-        if not _is_loopback(client):
+        if not _is_allowed_client(client):
             return JSONResponse(
-                {"detail": "The JARVIS REST API is local-only. Use the phone bridge from the app."},
+                {
+                    "detail": "The JARVIS REST API serves this machine and only the "
+                              "devices named in JARVIS_REMOTE_CLIENTS."
+                },
                 status_code=403,
             )
         if request.method in MUTATING_METHODS and request.headers.get(CLIENT_HEADER) != "desktop":
@@ -273,7 +309,7 @@ async def _snapshot(services: Services) -> dict[str, Any]:
         "type": "snapshot",
         "payload": {
             "health": health,
-            "settings": services.repo.all_settings(),
+            "settings": services.repo.public_settings(),
             "tasks": services.repo.list_tasks(40),
             "messages": services.repo.list_messages(60),
             "notifications": services.repo.list_notifications(40),
@@ -286,7 +322,7 @@ async def _snapshot(services: Services) -> dict[str, Any]:
 async def ui_socket(websocket: WebSocket) -> None:
     services: Services = websocket.app.state.services
     client = websocket.client.host if websocket.client else ""
-    if not _is_loopback(client) or not _origin_ok(websocket):
+    if not _is_allowed_client(client) or not _origin_ok(websocket):
         await websocket.close(code=1008, reason="Local desktop clients only")
         return
     await websocket.accept()

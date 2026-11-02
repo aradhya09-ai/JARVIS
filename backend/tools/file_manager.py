@@ -54,10 +54,16 @@ def resolve_folder(raw: str) -> Path:
     return Path(os.path.expandvars(text)).expanduser()
 
 
+def _spoken(folder: Path | None) -> str:
+    """A folder's short label, because these sentences are read out loud.
+    'Downloads' speaks well; 'C:\\Users\\...\\Downloads' does not."""
+    return paths.friendly_target(folder) if folder else "that folder"
+
+
 def _guarded_folder(ctx: ToolContext, raw: str, write: bool) -> Path:
     folder = resolve_folder(raw)
     if not folder.exists() or not folder.is_dir():
-        raise ToolError(f"Folder not found: {folder}")
+        raise ToolError(f"Folder not found: {_spoken(folder)}")
     resolved = folder.resolve()
     return ctx.policy.ensure_writable(resolved) if write else ctx.policy.ensure_readable(resolved)
 
@@ -155,7 +161,7 @@ def apply_organize_plan(folder: Path, ctx: ToolContext) -> dict[str, Any]:
 def undo_last_organize(folder: Path) -> dict[str, Any]:
     manifests = sorted((folder / ".jarvis").glob("organize-*.json"))
     if not manifests:
-        raise ToolError(f"No organize manifest found in {folder}. Nothing to undo.")
+        raise ToolError(f"No organize manifest found in {_spoken(folder)}. Nothing to undo.")
     manifest_path = manifests[-1]
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     restored, skipped = 0, 0
@@ -175,8 +181,10 @@ def undo_last_organize(folder: Path) -> dict[str, Any]:
 
 
 def search_files(folder: Path, query: str, extension: str | None, limit: int) -> list[dict[str, Any]]:
-    needle = query.lower().strip()
-    ext = extension.lower().strip()
+    # A search by name alone is the usual request, and extension arrives as None
+    # for it; calling .lower() on that killed every "find my screenshots".
+    needle = (query or "").lower().strip()
+    ext = (extension or "").lower().strip()
     if ext and not ext.startswith("."):
         ext = "." + ext
     results: list[dict[str, Any]] = []
@@ -331,11 +339,11 @@ async def preview_handler(args: FolderArgs, ctx: ToolContext) -> ToolResult:
     folder = _guarded_folder(ctx, args.folder, write=True)
     plan = await asyncio.to_thread(build_organize_plan, folder)
     if plan["file_count"] == 0:
-        return ToolResult.success(f"{folder} has no loose files to organize.", plan=plan)
+        return ToolResult.success(f"{_spoken(folder)} has no loose files to organize.", plan=plan)
     breakdown = ", ".join(f"{count} {name.lower()}" for name, count in plan["categories"].items())
     ctx.note(f"Organize preview: {plan['file_count']} files in {folder}")
     return ToolResult.success(
-        f"I found {plan['file_count']} loose files in {folder.name} ({breakdown}). "
+        f"I found {plan['file_count']} loose files in {_spoken(folder)} ({breakdown}). "
         "Nothing has been moved yet — review the plan and confirm to apply it.",
         plan=plan,
     )
@@ -351,8 +359,9 @@ async def apply_handler(args: OrganizeApplyArgs, ctx: ToolContext) -> ToolResult
             **result,
         )
     return ToolResult.success(
-        f"Moved {result['moved']} files into category folders in {folder.name}. "
-        f"An undo manifest was saved to {result['manifest']}.",
+        # The manifest path stays in the payload for the UI. Read aloud it is a
+        # `C:\...` string, which is the thing the user asked not to hear.
+        f"Moved {result['moved']} files into category folders in {folder.name}.",
         **result,
     )
 
@@ -377,9 +386,10 @@ async def search_handler(args: SearchArgs, ctx: ToolContext) -> ToolResult:
     )
     if not results:
         filters = " ".join(filter(None, [args.query, args.extension]))
-        return ToolResult.success(f"No files matching '{filters}' were found in {folder}.", results=[])
+        return ToolResult.success(
+            f"No files matching '{filters}' were found in {_spoken(folder)}.", results=[])
     return ToolResult.success(
-        f"Found {len(results)} matching files in {folder}.", results=results
+        f"Found {len(results)} matching files in {_spoken(folder)}.", results=results
     )
 
 
@@ -388,7 +398,7 @@ async def duplicates_handler(args: DuplicatesArgs, ctx: ToolContext) -> ToolResu
     groups = await asyncio.to_thread(find_duplicates, folder, args.min_size_kb)
     if not groups:
         return ToolResult.success(
-            f"No duplicate candidates found in {folder} above {args.min_size_kb} KB.", groups=[]
+            f"No duplicate candidates found in {_spoken(folder)} above {args.min_size_kb} KB.", groups=[]
         )
     wasted = sum(group["size"] * (len(group["files"]) - 1) for group in groups)
     return ToolResult.success(
@@ -464,16 +474,15 @@ async def summarize_handler(args: PathArgs, ctx: ToolContext) -> ToolResult:
 class OpenFolderArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    folder: str = Field(description="Known folder name or path, e.g. 'Downloads' or 'screenshots'.")
+    folder: str = Field(description="Known folder name or a folder inside an approved "
+                                    "root, e.g. 'Downloads' or 'screenshots'. A folder, "
+                                    "never a file.")
 
 
 async def open_folder_handler(args: OpenFolderArgs, ctx: ToolContext) -> ToolResult:
-    folder = resolve_folder(args.folder)
-    if not folder.exists():
-        return ToolResult.failure(
-            f"The {args.folder} folder does not exist at {folder}.",
-            hint="Check the folder name, or create it first.",
-        )
+    # Every sibling handler goes through _guarded_folder; this one used to hand
+    # any existing path to os.startfile, which runs an .exe it is given.
+    folder = _guarded_folder(ctx, args.folder, write=False)
     opened, message = await asyncio.to_thread(paths.open_path, folder)
     if not opened:
         return ToolResult.failure(message)
@@ -673,7 +682,8 @@ def build() -> list[ToolDefinition]:
         ToolDefinition(
             name="files.open_folder",
             description="Open a Windows known folder (Downloads, Desktop, Documents, "
-                        "Pictures, Screenshots) or a given path in File Explorer.",
+                        "Pictures, Screenshots) or one of your own folders in File "
+                        "Explorer. Only folders inside the approved roots.",
             args_model=OpenFolderArgs,
             risk=Risk.LOW,
             handler=open_folder_handler,
