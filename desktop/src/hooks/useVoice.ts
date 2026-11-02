@@ -71,6 +71,9 @@ const MAX_CHUNK = 200;
 // segment cut users off mid-command; a turn stays open until the room has
 // genuinely been quiet.
 const TURN_QUIET_MS = 750;
+// Interims are the engine still guessing, so they get a longer hold than a real
+// final before the turn is considered finished.
+const INTERIM_HOLD_MS = 1200;
 const TURN_WINDOW_MS = 9000;
 
 // Stray single-word finals from room noise must not become commands.
@@ -217,12 +220,27 @@ export function useVoice(options: VoiceOptions) {
   const voicesReadyRef = useRef(false);
   // The command being spoken right now, kept open across pauses so one
   // sentence split into three recognition finals still arrives as one command.
-  const turnRef = useRef<{ text: string; timer: number | null; deadline: number }>({
+  const turnRef = useRef<{
+    text: string;
+    timer: number | null;
+    deadline: number;
+    // The live guess the engine keeps revising while he is still talking, and
+    // whether a real final has landed yet. Interims only get used to end a turn
+    // when no final ever arrives.
+    interim: string;
+    hasFinal: boolean;
+  }>({
     text: '',
     timer: null,
     deadline: 0,
+    interim: '',
+    hasFinal: false,
   });
   const commandTurnRef = useRef<number | null>(null);
+  // The last command actually handed to the backend. Chrome sometimes delivers
+  // the same sentence as an interim and then again as a final, so a wake match
+  // that replays the command just run is dropped.
+  const lastDispatchRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });
   // Set by the first real click or keypress, so playback can be unlocked on
   // builds that do not expose navigator.userActivation.
   const activatedRef = useRef(false);
@@ -784,14 +802,17 @@ export function useVoice(options: VoiceOptions) {
       window.clearTimeout(turn.timer);
       turn.timer = null;
     }
-    const heard = turn.text.trim();
+    const heard = (turn.text || turn.interim).trim();
     turn.text = '';
+    turn.interim = '';
+    turn.hasFinal = false;
     turn.deadline = 0;
     setArmed(false);
     if (!dispatch) return;
     const phrase = optionsRef.current.wakePhrase.trim().toLowerCase();
     const command = phrase ? stripWakeWord(heard, phrase) : heard;
     if (!command || isFalseEnding(command)) return;
+    lastDispatchRef.current = { text: command.toLowerCase(), at: Date.now() };
     optionsRef.current.onCommand(command);
   }, [setArmed]);
 
@@ -799,6 +820,8 @@ export function useVoice(options: VoiceOptions) {
     const turn = turnRef.current;
     if (turn.timer !== null) window.clearTimeout(turn.timer);
     turn.text = '';
+    turn.interim = '';
+    turn.hasFinal = false;
     turn.deadline = Date.now() + TURN_WINDOW_MS;
     // Silence after the wake word still has to hand the loop back.
     turn.timer = window.setTimeout(() => closeTurn(false), TURN_WINDOW_MS);
@@ -809,11 +832,44 @@ export function useVoice(options: VoiceOptions) {
       const turn = turnRef.current;
       if (!turn.deadline) openTurn();
       turn.text = `${turn.text} ${raw}`.trim();
+      turn.hasFinal = true;
+      // A real final landed, so the interim watchdog is no longer needed.
+      if (turn.interim) turn.interim = '';
       if (turn.timer !== null) window.clearTimeout(turn.timer);
       const left = turn.deadline - Date.now();
       turn.timer = window.setTimeout(() => closeTurn(true), left <= 0 ? 0 : TURN_QUIET_MS);
     },
     [closeTurn, openTurn],
+  );
+
+  /**
+   * Chrome often keeps revising an interim transcript after he has stopped
+   * talking and never sends the final, which left the wake loop showing
+   * "listening" forever. Once the guess has held still for a full beat, treat it
+   * as what he said and run it.
+   */
+  const handleWakeInterim = useCallback(
+    (raw: string) => {
+      const turn = turnRef.current;
+      const clean = raw.trim();
+      if (!turn.deadline || !clean || turn.hasFinal) return;
+      if (turn.deadline - Date.now() <= 0) return;
+      if (heardOwnSpeech(clean)) return;
+      // Same words as the previous guess means the engine is still deciding; the
+      // timer already running gets to finish. Only growth restarts the clock.
+      if (clean === turn.interim) return;
+      // He is talking over the greeting: cut it short so the reply is not queued
+      // behind a word he has already stopped waiting for.
+      if (speakingRef.current) {
+        speechEpochRef.current += 1;
+        stopPlayback();
+      }
+      turn.interim = clean;
+      if (turn.timer !== null) window.clearTimeout(turn.timer);
+      const left = turn.deadline - Date.now();
+      turn.timer = window.setTimeout(() => closeTurn(true), Math.min(INTERIM_HOLD_MS, left));
+    },
+    [closeTurn, heardOwnSpeech, stopPlayback],
   );
 
   const start = useCallback(async () => {
@@ -856,11 +912,17 @@ export function useVoice(options: VoiceOptions) {
     modeRef.current = 'command';
     let handled = false;
     let collected = '';
+    let lastInterim = '';
+    let interimTimer: number | null = null;
     recognition.onstart = () => setListeningState(true);
     const commit = () => {
       if (commandTurnRef.current !== null) {
         window.clearTimeout(commandTurnRef.current);
         commandTurnRef.current = null;
+      }
+      if (interimTimer !== null) {
+        window.clearTimeout(interimTimer);
+        interimTimer = null;
       }
       const text = collected.trim();
       collected = '';
@@ -872,6 +934,22 @@ export function useVoice(options: VoiceOptions) {
         /* already ending */
       }
       optionsRef.current.onCommand(text);
+    };
+    /**
+     * The same end-of-speech rule as the wake loop, for push-to-talk: if the
+     * engine keeps guessing and never finalises, a still guess means he stopped
+     * talking and the command should run.
+     */
+    const followInterim = (guess: string) => {
+      const clean = guess.trim();
+      if (!clean || clean === lastInterim) return;
+      lastInterim = clean;
+      if (interimTimer !== null) window.clearTimeout(interimTimer);
+      collected = clean;
+      interimTimer = window.setTimeout(() => {
+        interimTimer = null;
+        commit();
+      }, INTERIM_HOLD_MS);
     };
     recognition.onresult = (event) => {
       let interim = '';
@@ -886,7 +964,16 @@ export function useVoice(options: VoiceOptions) {
       }
       if (finals && isFalseEnding(collected)) collected = '';
       setTranscript((collected + interim).trim());
-      if (!finals || handled) return;
+      if (!finals || handled) {
+        if (!finals && !handled) followInterim(interim);
+        return;
+      }
+      // A real final beats the guess it was built from.
+      lastInterim = '';
+      if (interimTimer !== null) {
+        window.clearTimeout(interimTimer);
+        interimTimer = null;
+      }
       if (commandTurnRef.current !== null) window.clearTimeout(commandTurnRef.current);
       commandTurnRef.current = window.setTimeout(() => {
         commandTurnRef.current = null;
@@ -979,6 +1066,11 @@ export function useVoice(options: VoiceOptions) {
       if (!armedRef.current && !heardOwnSpeech(clean)) {
         const hit = matchWakeWord(clean, phrase);
         if (hit.matched) {
+          // The interim watchdog may have already run this exact sentence; do not
+          // greet and execute it a second time.
+          const spoken = (hit.remainder || '').trim().toLowerCase();
+          if (spoken && spoken === lastDispatchRef.current.text
+            && Date.now() - lastDispatchRef.current.at < 3000) return;
           // The same utterance can arrive as two finals; a different sentence is a
           // new call and must be answered even seconds after the last one.
           const words = clean.toLowerCase();
@@ -1062,10 +1154,19 @@ export function useVoice(options: VoiceOptions) {
     let startedAt = Date.now();
     recognition.onresult = (event) => {
       let text = '';
+      let interim = '';
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         if (event.results[i].isFinal) text += ` ${event.results[i][0].transcript}`;
+        else interim += ` ${event.results[i][0].transcript}`;
       }
-      handleWakeResult(text.trim());
+      if (text.trim()) {
+        handleWakeResult(text.trim());
+        return;
+      }
+      // No final in this callback, but he may have finished speaking. Let the
+      // still-growing guess end the turn instead of waiting for a final that
+      // Chrome sometimes never sends.
+      if (interim.trim()) handleWakeInterim(interim.trim());
     };
     recognition.onerror = (event) => {
       if (event.error === 'aborted' || event.error === 'no-speech') return;
@@ -1089,6 +1190,12 @@ export function useVoice(options: VoiceOptions) {
       if (!wakeActiveRef.current || stoppedRef.current) return;
       const aliveFor = Date.now() - startedAt;
       if (aliveFor > 4000) wakeFailuresRef.current = 0;
+      // The engine closed the session while a turn was still open, so he has
+      // stopped talking: run what he said rather than letting the window expire
+      // and discard it.
+      if (turnRef.current.deadline && (turnRef.current.text || turnRef.current.interim).trim()) {
+        closeTurn(true);
+      }
       // Chrome ends continuous recognition by itself; restart it so the wake
       // word keeps working without the user re-arming anything. A session that
       // closes again the instant it opens is flapping, not listening.
@@ -1121,7 +1228,7 @@ export function useVoice(options: VoiceOptions) {
       );
       stopMic();
     }
-  }, [buildRecognition, handleWakeResult, setWakeState, stopMic, stopWakeLoop]);
+  }, [buildRecognition, closeTurn, handleWakeInterim, handleWakeResult, setWakeState, stopMic, stopWakeLoop]);
 
   const toggleWake = useCallback(async () => {
     if (wakeActiveRef.current) {
