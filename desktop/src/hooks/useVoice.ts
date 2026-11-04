@@ -75,6 +75,15 @@ const TURN_QUIET_MS = 750;
 // final before the turn is considered finished.
 const INTERIM_HOLD_MS = 1200;
 const TURN_WINDOW_MS = 9000;
+// Wake mode keeps talking back: after each answer the microphone reopens for
+// one more command, so the wake word is only needed to start the conversation.
+// The window is finite - an ordinary remark in the room must not become a task -
+// and a reply that runs long must not leave it armed indefinitely.
+const FOLLOW_UP_START_MS = 900;
+const FOLLOW_UP_WINDOW_MS = 7000;
+// Long enough for a model answer to arrive and be read out; past it the
+// conversation is over and the wake word is needed again.
+const FOLLOW_UP_MAX_WAIT_MS = 45000;
 
 // Stray single-word finals from room noise must not become commands.
 const NOISE_WORDS = new Set([
@@ -250,6 +259,12 @@ export function useVoice(options: VoiceOptions) {
   const systemEndRef = useRef<number | null>(null);
   // Consecutive wake-loop failures. One blip is retried; a run of them is a fault.
   const wakeFailuresRef = useRef(0);
+  // Wake mode keeps the conversation going: after a command is handed over, the
+  // microphone reopens for one more. This is the pending timer and the moment
+  // waiting for the answer to finish stops being worth it.
+  const followUpTimerRef = useRef<number | null>(null);
+  const followUpUntilRef = useRef(0);
+  const armFollowUpRef = useRef<(delay: number) => void>(() => undefined);
 
   const setListeningState = useCallback((value: boolean) => {
     listeningRef.current = value;
@@ -407,6 +422,13 @@ export function useVoice(options: VoiceOptions) {
     const next = afterSpeechRef.current;
     afterSpeechRef.current = null;
     if (next) next();
+    // The answer has been said out loud, so in wake mode the microphone goes
+    // back to him - including when the task itself took longer than the first
+    // follow-up window.
+    if (wakeActiveRef.current && Date.now() < followUpUntilRef.current
+      && !turnRef.current.deadline) {
+      armFollowUpRef.current(FOLLOW_UP_START_MS);
+    }
   }, [stopLevelLoop]);
 
   const loadVoices = useCallback(() => {
@@ -814,18 +836,55 @@ export function useVoice(options: VoiceOptions) {
     if (!command || isFalseEnding(command)) return;
     lastDispatchRef.current = { text: command.toLowerCase(), at: Date.now() };
     optionsRef.current.onCommand(command);
+    // Wake mode is a conversation: once the answer has been said out loud, the
+    // microphone opens again for the next command without another wake word.
+    if (wakeActiveRef.current) {
+      followUpUntilRef.current = Date.now() + FOLLOW_UP_MAX_WAIT_MS;
+      armFollowUpRef.current(FOLLOW_UP_START_MS);
+    }
   }, [setArmed]);
 
-  const openTurn = useCallback(() => {
+  const cancelFollowUp = useCallback(() => {
+    if (followUpTimerRef.current !== null) {
+      window.clearTimeout(followUpTimerRef.current);
+      followUpTimerRef.current = null;
+    }
+    followUpUntilRef.current = 0;
+  }, []);
+
+  const openTurn = useCallback((windowMs = TURN_WINDOW_MS) => {
     const turn = turnRef.current;
     if (turn.timer !== null) window.clearTimeout(turn.timer);
     turn.text = '';
     turn.interim = '';
     turn.hasFinal = false;
-    turn.deadline = Date.now() + TURN_WINDOW_MS;
+    turn.deadline = Date.now() + windowMs;
     // Silence after the wake word still has to hand the loop back.
-    turn.timer = window.setTimeout(() => closeTurn(false), TURN_WINDOW_MS);
+    turn.timer = window.setTimeout(() => closeTurn(false), windowMs);
   }, [closeTurn]);
+
+  /**
+   * Reopen the microphone for one follow-up command. It waits out any answer
+   * still being spoken, because hearing JARVIS say "Opened Chrome" is not
+   * hearing him; and it expires, so a long reply cannot leave a hot mic behind.
+   */
+  const armFollowUp = useCallback((delay: number) => {
+    if (followUpTimerRef.current !== null) window.clearTimeout(followUpTimerRef.current);
+    followUpTimerRef.current = window.setTimeout(() => {
+      followUpTimerRef.current = null;
+      if (!wakeActiveRef.current || stoppedRef.current) return;
+      if (Date.now() > followUpUntilRef.current) return;
+      if (turnRef.current.deadline) return;
+      if (speakingRef.current) {
+        armFollowUp(600);
+        return;
+      }
+      setArmed(true);
+      openTurn(FOLLOW_UP_WINDOW_MS);
+    }, delay);
+  }, [openTurn, setArmed]);
+
+  armFollowUpRef.current = armFollowUp;
 
   const addToTurn = useCallback(
     (raw: string) => {
@@ -855,6 +914,12 @@ export function useVoice(options: VoiceOptions) {
       if (!turn.deadline || !clean || turn.hasFinal) return;
       if (turn.deadline - Date.now() <= 0) return;
       if (heardOwnSpeech(clean)) return;
+      // The engine's interim buffer can still be holding the sentence that just
+      // ran. A fresh follow-up window must not execute it a second time.
+      const phrase = optionsRef.current.wakePhrase.trim().toLowerCase();
+      const guess = (phrase ? stripWakeWord(clean, phrase) : clean).trim().toLowerCase();
+      if (guess && guess === lastDispatchRef.current.text
+        && Date.now() - lastDispatchRef.current.at < 5000) return;
       // Same words as the previous guess means the engine is still deciding; the
       // timer already running gets to finish. Only growth restarts the clock.
       if (clean === turn.interim) return;
@@ -886,6 +951,8 @@ export function useVoice(options: VoiceOptions) {
       setWakeState(false);
       stoppedRef.current = true;
       closeTurn(false);
+      // Push-to-talk owns the microphone now; the wake conversation is over.
+      cancelFollowUp();
       try {
         recognitionRef.current?.abort();
       } catch {
@@ -1000,7 +1067,7 @@ export function useVoice(options: VoiceOptions) {
       modeRef.current = null;
       stopMic();
     }
-  }, [buildRecognition, closeTurn, ensureAnalyser, setListeningState, setWakeState, stopMic, supported]);
+  }, [buildRecognition, cancelFollowUp, closeTurn, ensureAnalyser, setListeningState, setWakeState, stopMic, supported]);
 
   startRef.current = start;
   speakRef.current = speak;
@@ -1012,6 +1079,7 @@ export function useVoice(options: VoiceOptions) {
       commandTurnRef.current = null;
     }
     closeTurn(false);
+    cancelFollowUp();
     const recognition = recognitionRef.current;
     recognitionRef.current = null;
     modeRef.current = null;
@@ -1028,7 +1096,7 @@ export function useVoice(options: VoiceOptions) {
     setListeningState(false);
     setWakeState(false);
     stopMic();
-  }, [closeTurn, setArmed, setListeningState, setWakeState, stopMic]);
+  }, [cancelFollowUp, closeTurn, setArmed, setListeningState, setWakeState, stopMic]);
 
   /**
    * One continuous recogniser owns wake detection, the greeting, the command
@@ -1083,6 +1151,7 @@ export function useVoice(options: VoiceOptions) {
           }
           setArmed(true);
           optionsRef.current.onWake();
+          cancelFollowUp();
           openTurn();
           if (hit.remainder) addToTurn(hit.remainder);
           const greeting = optionsRef.current.wakeGreeting.trim();
@@ -1107,13 +1176,17 @@ export function useVoice(options: VoiceOptions) {
         if (remainder) {
           openTurn();
           addToTurn(remainder);
+        } else {
+          // "Be quiet" ends the conversation, not just the sentence: the
+          // microphone must not reopen behind his back.
+          cancelFollowUp();
         }
         return;
       }
 
       if (armedRef.current) addToTurn(clean);
     },
-    [addToTurn, heardOwnSpeech, openTurn, setArmed, stopPlayback],
+    [addToTurn, cancelFollowUp, heardOwnSpeech, openTurn, setArmed, stopPlayback],
   );
 
   /**
@@ -1126,6 +1199,7 @@ export function useVoice(options: VoiceOptions) {
       setWakeState(false);
       modeRef.current = null;
       setWakeFault(fault);
+      cancelFollowUp();
       const recognition = recognitionRef.current;
       recognitionRef.current = null;
       if (recognition) {
@@ -1140,7 +1214,7 @@ export function useVoice(options: VoiceOptions) {
       }
       if (fault) setError(fault);
     },
-    [setWakeState],
+    [cancelFollowUp, setWakeState],
   );
 
   const startWakeLoop = useCallback(async () => {
@@ -1235,6 +1309,7 @@ export function useVoice(options: VoiceOptions) {
       stoppedRef.current = true;
       wakeActiveRef.current = false;
       closeTurn(false);
+      cancelFollowUp();
       setArmed(false);
       setWakeState(false);
       setWakeFault(null);
@@ -1278,6 +1353,7 @@ export function useVoice(options: VoiceOptions) {
     wakeFailuresRef.current = 0;
     await startWakeLoop();
   }, [
+    cancelFollowUp,
     closeTurn,
     ensureAnalyser,
     micPermission,
