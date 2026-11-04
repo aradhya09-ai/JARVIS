@@ -51,6 +51,27 @@ def _open(url: str) -> bool:
     return webbrowser.open(url, new=2)
 
 
+BRAND_NAMES = {"chrome.exe": "Chrome", "msedge.exe": "Edge",
+               "firefox.exe": "Firefox", "brave.exe": "Brave"}
+
+SITE_NAMES = {"youtube": "YouTube", "amazon": "Amazon", "github": "GitHub"}
+
+
+def _where(label: str) -> str:
+    """The browser the way a person would name it back."""
+    if label in ("", "default browser"):
+        return "the default browser"
+    return BRAND_NAMES.get(label.lower(), label.split(".")[0].title())
+
+
+def _site_word(engine: str) -> str:
+    key = normalize(engine or "google")
+    for name, brand in SITE_NAMES.items():
+        if name in key:
+            return brand
+    return ""
+
+
 def _validate_url(raw: str) -> str:
     candidate = raw.strip()
     if not candidate.startswith(("http://", "https://")):
@@ -105,7 +126,7 @@ async def open_url_handler(args: OpenUrlArgs, ctx: ToolContext) -> ToolResult:
         return ToolResult.failure(error)
     ctx.audit.record(ctx.actor, "browser.open", Risk.LOW.value,
                      {"url": url, "browser": label}, "ok")
-    return ToolResult.success(f"Opened {url} in {label}.", url=url, browser=label)
+    return ToolResult.success(f"Opened {url} in {_where(label)}.", url=url, browser=label)
 
 
 BROWSERS: dict[str, tuple[str, ...]] = {
@@ -221,11 +242,10 @@ async def search_in_handler(args: SearchInArgs, ctx: ToolContext) -> ToolResult:
         return ToolResult.failure(error)
     ctx.audit.record(ctx.actor, "browser.search", Risk.LOW.value,
                      {"query": args.query, "engine": args.engine, "browser": label}, "ok")
-    engine_name = normalize(args.engine or "google")
+    site = _site_word(args.engine)
     return ToolResult.success(
-        f"Searching {engine_name} for '{args.query}' in {label}. "
-        "I cannot read the results back without a search API, so I will not summarise them "
-        "unless you paste them here.",
+        f"Opened {_where(label)} and searched {f'{site} ' if site else ''}"
+        f"for '{args.query}'.",
         url=url, browser=label, results_readable=False,
     )
 
@@ -257,8 +277,13 @@ async def open_site_handler(args: OpenSiteArgs, ctx: ToolContext) -> ToolResult:
         return ToolResult.failure(error)
     ctx.audit.record(ctx.actor, "browser.open_site", Risk.LOW.value,
                      {"site": alias["name"], "browser": label}, "ok")
+    if args.query.strip():
+        return ToolResult.success(
+            f"Opened {alias['name']} and searched for '{args.query.strip()}'.",
+            url=url, site=alias["name"], browser=label,
+        )
     return ToolResult.success(
-        f"Opening {alias['name']} in {label}.", url=url, site=alias["name"], browser=label,
+        f"Opened {alias['name']} in {_where(label)}.", url=url, site=alias["name"], browser=label,
     )
 
 

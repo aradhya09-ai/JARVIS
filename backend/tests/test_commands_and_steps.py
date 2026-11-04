@@ -54,6 +54,14 @@ def planner(services):
      {"query": "recursion tutorial", "engine": "youtube"}),
     ("google DBMS normalization in edge", "browser.search",
      {"query": "DBMS normalization", "browser": "edge"}),
+    ("open youtube search for this word on chrome", "browser.search",
+     {"query": "this word", "browser": "chrome", "engine": "youtube"}),
+    ("open YouTube and search for recursion on chrome", "browser.search",
+     {"query": "recursion", "browser": "chrome", "engine": "youtube"}),
+    ("open youtube and search for DBMS normalization", "browser.open_site",
+     {"name": "youtube", "query": "DBMS normalization"}),
+    ("youtube par database search karo", "browser.search",
+     {"query": "database", "engine": "youtube"}),
     ("open Instagram in Edge", "browser.open_url", {"browser": "edge"}),
     ("open the Visual Studio Code shortcut", "shortcuts.open", {"name": "Visual Studio Code"}),
     ("open Downloads", "files.open_folder", {"folder": "downloads"}),
@@ -108,12 +116,45 @@ def test_every_clause_of_a_compound_command_is_planned(planner, text, tools):
 @pytest.mark.parametrize("text", [
     "open Chrome and search for Python recursion",
     "search YouTube for recursion and sorting tutorials",
+    "open YouTube and search for recursion on chrome",
+    "open youtube and search for DBMS normalization",
 ])
 def test_a_phrase_one_rule_already_fuses_is_not_split(planner, text):
     """Splitting these would launch the browser twice for one request."""
     plan = asyncio.run(planner.plan(text))
-    assert plan.tool == "browser.search"
+    assert plan.tool in ("browser.search", "browser.open_site")
     assert plan.steps == []
+
+
+def test_a_wake_word_inside_the_transcript_does_not_reach_the_query(planner):
+    """The engine can hand back the tail of the last sentence in front of a
+    fresh 'hi Jarvis', and those words are not what he asked to search."""
+    plan = asyncio.run(planner.plan(
+        "the meaning epidemic hi Jarvis open Chrome and search for the meaning epidemic"))
+    assert plan.tool == "browser.search"
+    assert plan.args == {"query": "the meaning epidemic", "browser": "chrome",
+                         "engine": "google"}
+
+
+def test_a_search_answers_with_one_short_sentence(services, monkeypatch):
+    """He asked for 'Opened Chrome and searched for X' and nothing else."""
+    from tools import browser_tools
+    from tools.base import ToolContext
+
+    monkeypatch.setattr(
+        browser_tools, "_open_in_browser",
+        lambda url, browser: (True, "default browser" if not browser.strip() else "chrome.exe", ""),
+    )
+    ctx = ToolContext(settings=services.settings, repo=services.repo, policy=services.policy,
+                      audit=services.audit, bus=services.bus)
+    result = asyncio.run(browser_tools.search_in_handler(
+        browser_tools.SearchInArgs(query="recursion", browser="chrome", engine="youtube"), ctx))
+    assert result.summary == "Opened Chrome and searched YouTube for 'recursion'."
+    assert "search API" not in result.summary
+
+    default = asyncio.run(browser_tools.search_in_handler(
+        browser_tools.SearchInArgs(query="recursion", browser="", engine="google"), ctx))
+    assert default.summary == "Opened the default browser and searched for 'recursion'."
 
 
 @pytest.mark.parametrize("text,tools", [

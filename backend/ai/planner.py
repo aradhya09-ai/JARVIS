@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from ai.model_router import ModelUnavailable, ModelRouter, SYSTEM_PROMPT, clock_context
 from config import Settings
@@ -21,7 +22,13 @@ from tools.base import ToolRegistry, ToolValidationError
 
 PlanKind = Literal["tool", "reply"]
 
-WAKE_WORD = re.compile(r"^\s*(?:(?:hey|ok|okay|hi)\s+)?jarvis\b[\s,.:;!-]*", re.I)
+WAKE_WORD = re.compile(r"^\s*(?:(?:hey|ok|okay|hi|hello)\s+)?jarvis\b[\s,.:;!-]*", re.I)
+
+# The engine sometimes hands back the end of the previous sentence in front of
+# the new one, so an address word spoken mid-stream is where the command starts.
+_WAKE_RESUME = re.compile(r"(?:hey|ok|okay|hi|hello)\s+jarvis\b[\s,.:;!?-]*", re.I)
+
+GENERIC_HOST_LABELS = {"www", "com", "co", "in", "org", "net", "gov", "edu"}
 
 # "remember this" with nothing after it is a request to be asked, not a fact.
 _BARE_MEMORY_POINTERS = {"this", "that", "it", "thisthing", "thatthing", "yeh", "ye", "thisis"}
@@ -67,6 +74,11 @@ SEARCH_ENGINES = {"youtube": "youtube", "amazon": "amazon", "github": "github",
                   "google": "google", "bing": "bing"}
 ENGINE_PHRASES = sorted(SEARCH_ENGINES, key=len, reverse=True)
 
+# Which app to use and where to look only tune an action; they never make a
+# second clause ask for something the fused plan left out. The engines that are
+# also destinations (YouTube, Amazon, GitHub) stay objects.
+MODIFIER_WORDS = set(BROWSER_WORDS) | set(BROWSER_WORDS.values()) | {"google", "bing"}
+
 # Boundaries between back-to-back commands, including the Hinglish conjunctions.
 CLAUSE_SPLIT = re.compile(
     r"\s*(?:and\s+then|and\s+ke\s+baad|then|,|;|\band\b|\baur\b|\bphir\b|\bplus\b)\s*", re.I)
@@ -92,9 +104,28 @@ def _is_extra(step: dict[str, Any], tools: set[str], named: set[str]) -> bool:
     """
     if str(step.get("tool") or "") in tools:
         return False
-    entities = {_norm(value) for value in (step.get("args") or {}).values()
-                if isinstance(value, str) and value.strip()}
-    return not entities or not entities <= named
+    entities = [str(value) for value in (step.get("args") or {}).values()
+                if isinstance(value, str) and value.strip()]
+    if not entities:
+        return True
+    covered = False
+    for value in entities:
+        clean = _norm(value)
+        if clean in named:
+            covered = True
+            continue
+        if clean in MODIFIER_WORDS:
+            continue
+        # A clause that only opens a site is covered when the fused plan used
+        # that site's name; 'https://www.youtube.com/' is the same 'youtube'.
+        if clean.startswith("http"):
+            host = {label for label in urlparse(value).netloc.lower().split(".")
+                    if label not in GENERIC_HOST_LABELS}
+            if host & named:
+                covered = True
+                continue
+        return True
+    return not covered
 
 
 @dataclass
@@ -122,7 +153,16 @@ class Plan:
 
 
 def strip_wake_word(text: str) -> str:
-    return WAKE_WORD.sub("", text).strip()
+    cleaned = WAKE_WORD.sub("", text).strip()
+    resume = None
+    for hit in _WAKE_RESUME.finditer(cleaned):
+        resume = hit
+    # The words after the last address are the command; the ones before it are
+    # the tail of whatever was said last time. A trailing address alone leaves
+    # the sentence where it was.
+    if resume and cleaned[resume.end():].strip(" ,.!?"):
+        cleaned = cleaned[resume.end():]
+    return cleaned.strip(" ,.!?")
 
 
 def _clean_name(raw: str) -> str:
@@ -1272,13 +1312,18 @@ class Planner:
         browser = _browser_in(stripped)
 
         combined = re.match(
-            r"^(?:open|launch|start)\s+(.+?)(?:\s+(?:and|then|phir|aur))\s*"
+            r"^(?:open|launch|start)\s+(.+?)\s*(?:(?:and|then|phir|aur)\s+)?"
             r"(?:search|google|look\s*up|dhundo|khojo)\s+(?:for\s+|about\s+)?(.+)$",
             stripped, re.I,
         )
         if combined:
             subject, tail = combined.group(1), combined.group(2)
             engine, query = _search_topic(tail)
+            # "open YouTube search for X" names the site first and says nothing
+            # about where to search, so the words belong to YouTube rather than a
+            # Google results page.
+            if engine == "google":
+                engine = _engine_in(subject) or engine
             named_browser = browser or _browser_name(subject)
             if not query:
                 return None
@@ -1408,6 +1453,21 @@ class Planner:
 
     def _rule_web_search(self, text: str) -> Plan | None:
         stripped = text.strip()
+        # Hinglish puts the site first: "youtube par database search karo".
+        site_first = re.match(
+            r"^(youtube|amazon|github)\s+(?:par|pe|on|me)\s+(.+?)\s*"
+            r"(?:search|dhundo|khojo|google)\s*(?:karo|kar\s*do|do|deo|dena|na)?$",
+            stripped, re.I,
+        )
+        if site_first:
+            query = _clean_name(site_first.group(2))
+            if query:
+                return self._tool(
+                    "browser.search",
+                    {"query": query, "engine": SEARCH_ENGINES[site_first.group(1).lower()],
+                     "browser": _browser_in(stripped) or ""},
+                    "web_search",
+                )
         match = re.match(
             r"^(?:search|google|look\s+up|browse)\b(?:\s+(?:the\s+web|online))?"
             r"(?:\s+(?:for|about|on|in))?\s+(.+)$",
